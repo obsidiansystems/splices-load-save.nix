@@ -1,0 +1,2213 @@
+diff --git a/compiler/ghc-external-splices-plugin/CHANGELOG.md b/compiler/ghc-external-splices-plugin/CHANGELOG.md
+new file mode 100644
+index 0000000..415cdd6
+--- /dev/null
++++ b/compiler/ghc-external-splices-plugin/CHANGELOG.md
+@@ -0,0 +1,5 @@
++# Revision history for ghc-external-splices-plugin
++
++## 8.6.5 -- YYYY-mm-dd
++
++* First version. Released on an unsuspecting world.
+diff --git a/compiler/ghc-external-splices-plugin/LICENSE b/compiler/ghc-external-splices-plugin/LICENSE
+new file mode 100644
+index 0000000..2d41317
+--- /dev/null
++++ b/compiler/ghc-external-splices-plugin/LICENSE
+@@ -0,0 +1,30 @@
++Copyright (c) 2019, ???
++
++All rights reserved.
++
++Redistribution and use in source and binary forms, with or without
++modification, are permitted provided that the following conditions are met:
++
++    * Redistributions of source code must retain the above copyright
++      notice, this list of conditions and the following disclaimer.
++
++    * Redistributions in binary form must reproduce the above
++      copyright notice, this list of conditions and the following
++      disclaimer in the documentation and/or other materials provided
++      with the distribution.
++
++    * Neither the name of ??? nor the names of other
++      contributors may be used to endorse or promote products derived
++      from this software without specific prior written permission.
++
++THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
++LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
++A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
++OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
++SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
++LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
++DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
++THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
++(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
++OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+diff --git a/compiler/ghc-external-splices-plugin/Setup.hs b/compiler/ghc-external-splices-plugin/Setup.hs
+new file mode 100644
+index 0000000..9a994af
+--- /dev/null
++++ b/compiler/ghc-external-splices-plugin/Setup.hs
+@@ -0,0 +1,2 @@
++import Distribution.Simple
++main = defaultMain
+diff --git a/compiler/ghc-external-splices-plugin/cabal.project b/compiler/ghc-external-splices-plugin/cabal.project
+new file mode 100644
+index 0000000..51c5546
+--- /dev/null
++++ b/compiler/ghc-external-splices-plugin/cabal.project
+@@ -0,0 +1,9 @@
++packages: . test-pkg/
++allow-newer: True
++
++package ghc-external-slices-plugin
++  ghc-options: -Wall -Werror
++
++package test-pkg
++  -- ghc-options: -fplugin=Splices.Plugin -fplugin-opt=Splices.Plugin:save -fplugin-opt=Splices.Plugin:./foobar
++  -- ghc-options: -fplugin=Splices.Plugin -fplugin-opt=Splices.Plugin:load -fplugin-opt=Splices.Plugin:./foobar
+diff --git a/compiler/ghc-external-splices-plugin/ghc-external-splices-plugin.cabal b/compiler/ghc-external-splices-plugin/ghc-external-splices-plugin.cabal
+new file mode 100644
+index 0000000..4797be5
+--- /dev/null
++++ b/compiler/ghc-external-splices-plugin/ghc-external-splices-plugin.cabal
+@@ -0,0 +1,32 @@
++cabal-version:       2.0
++name:                ghc-external-splices-plugin
++version:             8.8.1
++synopsis:            Saving/loading TH splice results, as a plugin
++-- description:
++homepage:            https://gitlab.haskell.org/alp/ghc-external-splices-plugin
++-- bug-reports:
++license:             BSD3
++license-file:        LICENSE
++author:              ???
++maintainer:          alp@well-typed.com
++-- copyright:
++category:            Language
++build-type:          Simple
++extra-source-files:  CHANGELOG.md
++
++library
++  exposed-modules:     Splices.Conversions,
++                       Splices.Data,
++                       Splices.Plugin,
++                       Splices.Serialise.Class,
++                       Splices.Serialise.Instances
++  build-depends:       base, ghc == 8.10.*,
++                       ghc-boot,
++                       bytestring == 0.10.*,
++                       containers == 0.6.*,
++                       directory == 1.3.*,
++                       filepath == 1.4.*
++  hs-source-dirs:      src
++  default-language:    Haskell2010
++  default-extensions:  NoImplicitPrelude
++  ghc-options:         -Wall -Werror
+diff --git a/compiler/ghc-external-splices-plugin/src/Splices/Conversions.hs b/compiler/ghc-external-splices-plugin/src/Splices/Conversions.hs
+new file mode 100644
+index 0000000..1223c32
+--- /dev/null
++++ b/compiler/ghc-external-splices-plugin/src/Splices/Conversions.hs
+@@ -0,0 +1,228 @@
++-- {-# LANGUAGE ConstraintKinds, DeriveFunctor #-}
++{-# LANGUAGE FlexibleInstances #-}
++{-# LANGUAGE MultiParamTypeClasses #-}
++-- {-# LANGUAGE TypeFamilies, TypeSynonymInstances #-}
++{-# LANGUAGE StandaloneDeriving, GeneralizedNewtypeDeriving #-}
++{-# LANGUAGE DeriveFoldable, DeriveTraversable #-}
++{-# OPTIONS_GHC -fno-warn-orphans #-}
++module Splices.Conversions where
++
++import GhcPrelude
++
++import Control.Monad
++import Control.Monad.IO.Class
++import Data.Char (isDigit)
++import Data.List (intercalate)
++import Data.Maybe
++import Data.Word
++
++import DynFlags
++import FastString
++import GHC.Hs.Expr
++import Module
++import Name
++import Outputable
++import PackageConfig
++import Packages
++import RdrName
++import SrcLoc
++import TcRnTypes
++import IfaceType
++import ToIface (toIfaceType)
++import TyCoRep (Type(..), TyLit(..))
++
++newtype SeName = SeName RdrName
++  deriving (Outputable, OutputableBndr)
++
++mkSeName :: RdrName -> SeName
++mkSeName = SeName
++
++data ConvError
++  = ConvUnsupported String String SDoc
++  -- constructor name, type name, text rendering
++  -- of the unsupported subexpression
++  | ConvBadTag String Word16 -- type name, tag
++  | ConvFailure String
++
++data ConvResult a
++  = ConvError ConvError
++  | ConvOK a
++  deriving Functor
++-- * Conversion utilities
++
++newtype Conv a = Conv { runConv :: RnM (ConvResult a) }
++
++instance Functor Conv where
++  fmap f (Conv k) = Conv (fmap (fmap f) k)
++
++instance Applicative Conv where
++  pure = Conv . return . ConvOK
++  (<*>) = ap
++
++instance Monad Conv where
++  return = pure
++
++  Conv mx >>= f = Conv $ mx >>= \cvx -> case cvx of
++    ConvOK x    -> runConv (f x)
++    ConvError e -> pure (ConvError e)
++
++instance MonadIO Conv where
++  liftIO m = liftRn (liftIO m)
++
++unsupported :: String -- ^ constructor name
++            -> String -- ^ type name
++            -> SDoc   -- ^ textual rendering of the unsupported subexpression
++            -> Conv a
++unsupported con ty subexpr = Conv $
++  pure (ConvError $ ConvUnsupported con ty subexpr)
++
++badTag :: String -- ^ type name
++       -> Word16 -- ^ tag
++       -> Conv a
++badTag ty tag = Conv $
++  pure (ConvError $ ConvBadTag ty tag)
++
++badInput :: String -> Conv a
++badInput str = Conv $ pure (ConvError $ ConvFailure str)
++
++liftRn :: RnM a -> Conv a
++liftRn = Conv . fmap ConvOK
++
++class ConvertType t u where
++  convertType :: t -> Conv u
++
++class ConvertName a b where
++  convertName :: a -> Conv b
++
++instance ConvertName a b => ConvertName (Located a) (Located b) where
++  convertName = traverse convertName
++
++instance ConvertName a b => ConvertName [a] [b] where
++  convertName = traverse convertName
++
++instance ConvertName a b => ConvertName (Either e a) (Either e b) where
++  convertName = traverse convertName
++
++instance ConvertName a b => ConvertName (HsMatchContext a) (HsMatchContext b) where
++  convertName = traverse convertName
++
++instance ConvertName a b => ConvertName (HsStmtContext a) (HsStmtContext b) where
++  convertName = traverse convertName
++
++instance ConvertName a b => ConvertName (Maybe a) (Maybe b) where
++  convertName = traverse convertName
++
++instance ConvertType a a where
++  convertType = pure
++
++instance ConvertType Type IfaceType where
++  convertType = pure . toIfaceType
++
++instance ConvertType IfaceType Type where
++  convertType (IfaceLitTy n) = pure $ LitTy (go n)
++    where go (IfaceNumTyLit a) = NumTyLit a
++          go (IfaceStrTyLit a) = StrTyLit a
++  convertType e@(IfaceFreeTyVar {}) = unsupported "IfaceFreeTyVar" "IfaceType" (ppr e)
++  convertType e@(IfaceTyVar {}) = unsupported "IfaceTyVar" "IfaceType" (ppr e)
++  convertType e@(IfaceAppTy {}) = unsupported "IfaceAppTy" "IfaceType" (ppr e)
++  convertType e@(IfaceFunTy {}) = unsupported "IfaceFunTy" "IfaceType" (ppr e)
++  convertType e@(IfaceForAllTy {}) = unsupported "IfaceForAllTy" "IfaceType" (ppr e)
++  convertType e@(IfaceTyConApp {}) = unsupported "IfaceTyConApp" "IfaceType" (ppr e)
++  convertType e@(IfaceCastTy {}) = unsupported "IfaceCastTy" "IfaceType" (ppr e)
++  convertType e@(IfaceCoercionTy {}) = unsupported "IfaceCoercion" "IfaceType" (ppr e)
++  convertType e@(IfaceTupleTy {}) = unsupported "IfaceTupleTy" "IfaceType" (ppr e)
++
++
++instance ConvertName RdrName SeName where
++  convertName = pure . mkSeName
++
++instance ConvertName SeName RdrName where
++  convertName (SeName n) = case n of
++    Orig mdl occn -> do
++      -- TODO: introduce some caching here, to avoid doing the
++      --       searchPackageId dance too often.
++      currentMod <- liftRn getModule
++
++      if samePackages currentMod mdl
++        then let newMod = mdl { moduleUnitId = moduleUnitId currentMod } in
++               pure (Orig newMod occn)
++        else do mnewmod <- liftRn (findEquivalentModule mdl)
++                case mnewmod of
++                  Nothing   -> pure (Orig mdl occn)
++                  Just mod' -> pure (Orig mod' occn)
++
++    _             -> pure n
++
++    where samePackages mod1 mod2 = fromMaybe False $ do -- maybe monad
++            let str1 = unitIdString (moduleUnitId mod1)
++                str2 = unitIdString (moduleUnitId mod2)
++            (pkg1, ver1, _mhash1) <- parseUnitId' str1
++            (pkg2, ver2, _mhash2) <- parseUnitId' str2
++            return (pkg1 == pkg2 && ver1 == ver2)
++
++instance ConvertName Name SeName where
++  convertName n = pure $ mkSeName (nameRdrName n)
++
++instance ConvertName SeName Name where
++  convertName (SeName n) = case isExact_maybe n of
++    Just a -> pure a
++    _      -> badInput "convertName :: SeName -> Name: non exact RdrName in SeName"
++
++-- * Looking up modules/packages for Orig names
++
++-- this rejects wired in packages, because we want to leave them untouched
++parseUnitId' :: String -> Maybe (String, String, Maybe String)
++parseUnitId' = parse
++
++  where
++    parse s = case splitOn '-' (reverse s) of
++      ("":_) -> Nothing
++      xs | length xs >= 1 && last xs == "" -> Nothing
++      (hash:ver:name) | isVersion ver ->
++         Just (intercalate "-" (reverse name), ver, Just hash)
++      (ver:name) | isVersion ver ->
++         Just (intercalate "-" (reverse name), ver, Nothing)
++      _ -> Nothing
++    splitOn c = go []
++      where go acc (x:xs)
++              | x == c    = acc : go "" xs
++              | otherwise = go (x:acc) xs
++            go acc [] = [acc]
++    isVersion = go False
++      -- True: waiting for digit or dot (we've seen a digit last)
++      -- False: waiting for digit (we've just seen a dot)
++      where go False (c:cs)
++              | isDigit c = go True cs
++              | otherwise = False
++            go True (c:cs)
++              | isDigit c = go True cs
++              | c == '.'  = go False cs
++              | otherwise = False
++            go b [] = b -- if we've seen a dot last (False), we fail
++                        -- otherwise, the version number can end here
++
++-- | Look up the module from the same package, but built by the
++--   current compiler, therefore with a slightly different hash
++--   in the unit id than the input Module, which was built by some
++--   non-cross-compiling GHC.
++findEquivalentModule :: Module -> RnM (Maybe Module)
++findEquivalentModule mdl = do
++  case parseUnitId' unitIdStr of
++    Nothing -> return Nothing
++    Just (pkg, ver, _mhash) -> do
++      muid <- lookFor pkg ver
++      maybe (pure Nothing) (\uid -> return $ Just (mdl { moduleUnitId = uid })) muid
++
++  where unitIdStr = unitIdString (moduleUnitId mdl)
++
++lookFor :: String -> String -> RnM (Maybe UnitId)
++lookFor pkg ver = do
++  dflags <- getDynFlags
++  let pkgid = mkFastString (pkg ++ "-" ++ ver)
++      pkgs = searchPackageId dflags (SourcePackageId pkgid)
++  if null pkgs then pure Nothing else pure (Just $ packageConfigId (head pkgs))
++
++deriving instance Foldable HsMatchContext
++deriving instance Traversable HsMatchContext
++deriving instance Foldable HsStmtContext
++deriving instance Traversable HsStmtContext
+diff --git a/compiler/ghc-external-splices-plugin/src/Splices/Data.hs b/compiler/ghc-external-splices-plugin/src/Splices/Data.hs
+new file mode 100644
+index 0000000..72aa0da
+--- /dev/null
++++ b/compiler/ghc-external-splices-plugin/src/Splices/Data.hs
+@@ -0,0 +1,235 @@
++{-# LANGUAGE DeriveGeneric #-}
++module Splices.Data where
++
++import BinIface
++import qualified Binary as Bin
++import DynFlags
++import ErrUtils
++import FastMutInt
++import GHC.Hs.Decls
++import GHC.Hs.Expr
++import GHC.Hs.Extension
++import GHC.Hs.Pat
++import GHC.Hs.Types
++import IfaceEnv
++import Module
++import Outputable
++import SrcLoc
++import TcRnTypes
++import UniqFM
++
++import Splices.Conversions
++import Splices.Serialise.Class
++import Splices.Serialise.Instances ()
++
++import Control.Monad
++import Control.Monad.IO.Class
++import Data.IORef
++import GHC.Generics (Generic)
++import qualified Data.Map as Map
++import Prelude hiding ((<>))
++import System.Directory
++import System.FilePath
++
++data SpliceResult
++  = SRExpr  (LHsExpr GhcPs)
++  | SRDecls [LHsDecl GhcPs]
++  | SRPat   (LPat GhcPs)
++  | SRTy    (LHsType GhcPs)
++  deriving Generic
++
++instance Serialise SpliceResult
++
++newtype HsSpliceData = HsSpliceData
++  { hsSpliceMap :: Map.Map SrcSpan SpliceResult }
++
++instance Serialise HsSpliceData where
++  sput bh (HsSpliceData m) = sput bh (Map.toList m)
++  sget bh = fmap (HsSpliceData . Map.fromList) (sget bh)
++
++emptyHsSpliceData :: HsSpliceData
++emptyHsSpliceData = HsSpliceData Map.empty
++
++nonEmptyHsSpliceData :: HsSpliceData -> Bool
++nonEmptyHsSpliceData = not . Map.null . hsSpliceMap
++
++readHsSpliceData :: FilePath -> TcM HsSpliceData
++readHsSpliceData fp = do
++  exists <- liftIO (doesFileExist fp)
++  if exists
++    then do bh <- liftIO (Bin.readBinMem fp)
++            ncu <- mkNameCacheUpdater
++            checkedConv $ getWithUserData' ncu bh sget
++    else pure emptyHsSpliceData
++
++writeHsSpliceData :: FilePath -> HsSpliceData -> TcM ()
++writeHsSpliceData fp splicedata =
++  when (nonEmptyHsSpliceData splicedata) $ do
++    dflags <- getDynFlags
++    bh <- liftIO $ Bin.openBinMem (100 * 1024)
++    --  ^^^ FIXME: how should we compute an approximation of size?
++    checkedConv $ putWithUserData' (debugTraceMsg dflags 3) bh splicedata sput
++    liftIO $ createDirectoryIfMissing True $ takeDirectory fp
++    liftIO (Bin.writeBinMem bh fp)
++
++getModuleSplicesPath :: FilePath -> Module -> FilePath
++getModuleSplicesPath splicesDir m = splicesDir
++  </> toPath (moduleNameString (moduleName m)) <.> "hs-splice"
++
++  where toPath = map (\c -> if c == '.' then '/' else c)
++
++recordSpliceResult
++  :: SrcSpan -> SpliceResult -> HsSpliceData -> HsSpliceData
++recordSpliceResult loc res (HsSpliceData m) = HsSpliceData (Map.insert loc res m)
++
++lookupSpliceResult :: SrcSpan -> HsSpliceData -> Maybe SpliceResult
++lookupSpliceResult loc (HsSpliceData m) = Map.lookup loc m
++
++checkedConv :: Conv a -> RnM a
++checkedConv (Conv m) = do
++  res <- m
++  case res of
++    ConvOK a -> pure a
++    ConvError (ConvUnsupported conName tyName expr) ->
++      pprPanic "Splices.Data.checkedConv" $ vcat
++        [ text "GHC encountered a Haskell construct not supported by the splices plugin"
++        , nest 4 expr
++        , nest 4 (text "constructor " <> text conName <> text " of type " <> text tyName)
++        ]
++    ConvError (ConvBadTag ty tag) ->
++      pprPanic "SpliceData.handleUnsupported" . vcat $
++        [ text "GHC encountered an unknown constructor tag:"
++        , nest 4 $ text (show tag)
++        , text "for type " <> quote (text ty)
++        ]
++    ConvError (ConvFailure s) -> panic s
++
++-- | Panics with a nice error when we encounter an unsupported
++--   construct, or returns the actual result if the conversion
++--   succeeded.
++handleUnsupported
++  :: Located SDoc -- ^ TH expression that got evaluated
++  -> Maybe SDoc -- ^ code resulting from the evaluation of the 1st arg
++  -> ConvResult a -- ^ result of the conversion
++  -> RnM a
++handleUnsupported (L loc thDoc) resDoc convRes = case convRes of
++  ConvOK a -> pure a
++  ConvError (ConvUnsupported conName tyName subexprDoc) ->
++    pprPanic "SpliceData.handleUnsupported" . vcat $
++      [ text "GHC encountered a Haskell construct not supported by -{load, save}-splices:"
++      , nest 4 $ subexprDoc <> text (" - constructor " ++ conName ++ " of type " ++ tyName)
++      , text "while evaluating the following expression from "  <> ppr loc <> text ":"
++      , nest 4 $ thDoc
++      ] ++
++      maybe [] (\d -> [text "which resulted in:" , nest 4 d]) resDoc
++  ConvError (ConvBadTag ty tag) ->
++    pprPanic "SpliceData.handleUnsupported" . vcat $
++      [ text "GHC encountered an unknown constructor tag:"
++      , nest 4 $ text (show tag ++ " for type " ++ ty)
++      , text "while decoding a Haskell AST from an .hs-splice file"
++      , text "for splice at " <> ppr loc <> text ":"
++      , nest 4 $ thDoc
++      ]
++  ConvError (ConvFailure errorStr) -> panic errorStr
++
++-- {get, put}WithUserData'
++
++putWithUserData'
++  :: MonadIO m
++  => (SDoc -> IO ()) -> Bin.BinHandle -> a
++  -> (Bin.BinHandle -> a -> m ())
++  -> m ()
++putWithUserData' log_act bh payload putThing = do
++    -- Remember where the dictionary pointer will go
++    dict_p_p <- liftIO (Bin.tellBin bh)
++    -- Placeholder for ptr to dictionary
++    liftIO (Bin.put_ bh dict_p_p)
++
++    -- Remember where the symbol table pointer will go
++    symtab_p_p <- liftIO (Bin.tellBin bh)
++    liftIO (Bin.put_ bh symtab_p_p)
++    -- Make some initial state
++    symtab_next <- liftIO newFastMutInt
++    liftIO (writeFastMutInt symtab_next 0)
++    symtab_map <- liftIO (newIORef emptyUFM)
++    let bin_symtab = BinSymbolTable {
++                         bin_symtab_next = symtab_next,
++                         bin_symtab_map  = symtab_map }
++    dict_next_ref <- liftIO newFastMutInt
++    liftIO (writeFastMutInt dict_next_ref 0)
++    dict_map_ref <- liftIO (newIORef emptyUFM)
++    let bin_dict = BinDictionary {
++                       bin_dict_next = dict_next_ref,
++                       bin_dict_map  = dict_map_ref }
++
++    -- Put the main thing,
++    bh' <- return $ Bin.setUserData bh $
++      Bin.newWriteState (putName bin_dict bin_symtab)
++                        (putName bin_dict bin_symtab)
++                        (putFastString bin_dict)
++    putThing bh' payload
++
++    -- Write the symtab pointer at the front of the file
++    symtab_p <- liftIO (Bin.tellBin bh')       -- This is where the symtab will start
++    liftIO (Bin.putAt bh' symtab_p_p symtab_p) -- Fill in the placeholder
++    liftIO (Bin.seekBin bh' symtab_p)          -- Seek back to the end of the file
++
++    -- Write the symbol table itself
++    symtab_next' <- liftIO (readFastMutInt symtab_next)
++    symtab_map'  <- liftIO (readIORef symtab_map)
++    liftIO (putSymbolTable bh' symtab_next' symtab_map')
++    liftIO $ log_act (text "writeBinIface:" <+> int symtab_next'
++                                            <+> text "Names")
++
++    -- NB. write the dictionary after the symbol table, because
++    -- writing the symbol table may create more dictionary entries.
++
++    -- Write the dictionary pointer at the front of the file
++    dict_p <- liftIO (Bin.tellBin bh')     -- This is where the dictionary will start
++    liftIO (Bin.putAt bh' dict_p_p dict_p) -- Fill in the placeholder
++    liftIO (Bin.seekBin bh' dict_p)        -- Seek back to the end of the file
++
++    -- Write the dictionary itself
++    dict_next <- liftIO (readFastMutInt dict_next_ref)
++    dict_map  <- liftIO (readIORef dict_map_ref)
++    liftIO $ Bin.putDictionary bh' dict_next dict_map
++    liftIO $ log_act (text "writeBinIface:" <+> int dict_next
++                                            <+> text "dict entries")
++
++
++getWithUserData'
++  :: MonadIO m
++  => NameCacheUpdater
++  -> Bin.BinHandle
++  -> (Bin.BinHandle -> m a)
++  -> m a
++getWithUserData' ncu bh getThing = do
++    -- Read the dictionary
++    -- The next word in the file is a pointer to where the dictionary is
++    -- (probably at the end of the file)
++    dict <- liftIO $ do
++      dict_p <- Bin.get bh
++      data_p <- Bin.tellBin bh          -- Remember where we are now
++      Bin.seekBin bh dict_p
++      dict   <- Bin.getDictionary bh
++      Bin.seekBin bh data_p             -- Back to where we were before
++      return dict
++
++    -- Initialise the user-data field of bh
++    bh'' <- liftIO $ do
++        bh' <- return $ Bin.setUserData bh $
++          Bin.newReadState (error "getSymtabName")
++                           (getDictFastString dict)
++        symtab_p <- Bin.get bh'     -- Get the symtab ptr
++        data_p <- Bin.tellBin bh'          -- Remember where we are now
++        Bin.seekBin bh' symtab_p
++        symtab <- getSymbolTable bh' ncu
++        Bin.seekBin bh' data_p             -- Back to where we were before
++
++        -- It is only now that we know how to get a Name
++        return $ Bin.setUserData bh' $
++          Bin.newReadState (getSymtabName ncu dict symtab)
++                           (getDictFastString dict)
++
++    -- Read the interface file
++    getThing bh''
+diff --git a/compiler/ghc-external-splices-plugin/src/Splices/Plugin.hs b/compiler/ghc-external-splices-plugin/src/Splices/Plugin.hs
+new file mode 100644
+index 0000000..78bab19
+--- /dev/null
++++ b/compiler/ghc-external-splices-plugin/src/Splices/Plugin.hs
+@@ -0,0 +1,140 @@
++module Splices.Plugin where
++
++import GhcPrelude
++
++import System.Directory (createDirectoryIfMissing)
++import System.Environment (lookupEnv)
++import Control.Applicative ((<|>))
++
++import DynFlags (DynFlags, hooks)
++import GHC.Hs.Expr (LHsExpr)
++import GHC.Hs.Extension (GhcTc)
++import GHC.Serialized (toSerialized, serializeWithData)
++import Hooks (runMetaHook)
++import HscTypes (MetaRequest(..), MetaResult, MetaHook, metaRequestD, metaRequestE, metaRequestP, metaRequestT)
++import Module (getModule)
++import PlainPanic (panic)
++import Plugins (Plugin(..), PluginWithArgs(..), StaticPlugin(..), defaultPlugin, purePlugin)
++import SrcLoc (GenLocated(L), SrcSpan)
++import TcRnTypes (TcM)
++import TcSplice (defaultRunMeta)
++
++import Splices.Data
++
++-- This also requires patching GHC to ensure dynflagsPlugin is called for static
++-- plugins.
++staticPlugin :: StaticPlugin
++staticPlugin = StaticPlugin $ PluginWithArgs
++  { paPlugin = plugin
++  , paArguments = []
++  }
++
++plugin :: Plugin
++plugin = defaultPlugin
++  { dynflagsPlugin = registerHook
++  , pluginRecompile = purePlugin
++  }
++
++-- Since this is used as a static plugin, we don't get passed args.
++registerHook :: [String] -> (DynFlags -> IO DynFlags)
++registerHook _opts = \dflags -> do
++  mMode <- getModeEnvVar
++  case mMode of
++    Nothing -> return dflags
++    Just mode -> do
++      createDirectoryIfMissing True (modeDir mode)
++      return $ dflags
++        { hooks = (hooks dflags)
++          { runMetaHook = Just $ splicesHook mode defaultRunMeta }
++        }
++
++splicesHook :: Mode -> MetaHook TcM -> MetaHook TcM
++splicesHook mode metaHook req e = case mode of
++  Load dir -> load dir
++  Save dir
++    | isAW req  -> metaHook req e
++    | otherwise -> save dir
++
++  where load d = do
++          splicedata <- readHsSpliceData =<< spliceFilePath d
++          readSpliceFor (loc e) splicedata req
++
++        save d = do
++          (spliceres, res) <- runMHook metaHook req e
++          fp <- spliceFilePath d
++          splicedata <- readHsSpliceData fp
++          let splicedata' = recordSpliceResult (loc e) spliceres splicedata
++          writeHsSpliceData fp splicedata'
++          return res
++
++        spliceFilePath d = do
++          mdl <- getModule
++          return (getModuleSplicesPath d mdl)
++
++        loc (L l _) = l
++
++        isAW (MetaAW _) = True
++        isAW _ = False
++
++runMHook
++  :: MetaHook TcM -> MetaRequest -> LHsExpr GhcTc
++  -> TcM (SpliceResult, MetaResult)
++runMHook h req e = case req of
++  MetaE k -> do
++    resE <- metaRequestE h e
++    pure (SRExpr resE, k resE)
++  MetaD k -> do
++    resDs <- metaRequestD h e
++    pure (SRDecls resDs, k resDs)
++  MetaT k -> do
++    resT <- metaRequestT h e
++    pure (SRTy resT, k resT)
++  MetaP k -> do
++    resP <- metaRequestP h e
++    pure (SRPat resP, k resP)
++  MetaAW _ -> panic "runMHook: MetaAW -> impossible"
++
++readSpliceFor
++  :: SrcSpan
++  -> HsSpliceData
++  -> MetaRequest
++  -> TcM MetaResult
++readSpliceFor loc splicedata req =
++  case lookupSpliceResult loc splicedata of
++    Nothing -> panic ("Could not find splice result for source span " ++ show loc)
++    Just r -> pure (go r req)
++
++  where go (SRExpr e) (MetaE k) = k e
++        go (SRDecls ds) (MetaD k) = k ds
++        go (SRPat p) (MetaP k) = k p
++        go (SRTy t) (MetaT k) = k t
++        go _ (MetaAW k) = k (toSerialized serializeWithData ())
++        go sres metareq = mismatch sres metareq
++
++        mismatch sres metareq = panic $
++          "readSpliceFor: couldn't match " ++ srstr sres ++ " splice result" ++
++          " with " ++ mrstr metareq ++ " meta request"
++
++        srstr (SRExpr _) = "expression"
++        srstr (SRDecls _) = "declarations"
++        srstr (SRPat _) = "pattern"
++        srstr (SRTy _) = "type"
++
++        mrstr (MetaE _) = "expression"
++        mrstr (MetaD _) = "declarations"
++        mrstr (MetaP _) = "pattern"
++        mrstr (MetaT _) = "type"
++        mrstr _         = panic "mrstr: impossible"
++
++data Mode = Load FilePath | Save FilePath
++  deriving (Eq, Show)
++
++modeDir :: Mode -> FilePath
++modeDir (Load d) = d
++modeDir (Save d) = d
++
++getModeEnvVar :: IO (Maybe Mode)
++getModeEnvVar = do
++  mSaveDir <- fmap Save <$> lookupEnv "EXTERNAL_SPLICES_SAVE"
++  mLoadDir <- fmap Load <$> lookupEnv "EXTERNAL_SPLICES_LOAD"
++  return $ mSaveDir <|> mLoadDir
+diff --git a/compiler/ghc-external-splices-plugin/src/Splices/Plugin.hs-boot b/compiler/ghc-external-splices-plugin/src/Splices/Plugin.hs-boot
+new file mode 100644
+index 0000000..be411d6
+--- /dev/null
++++ b/compiler/ghc-external-splices-plugin/src/Splices/Plugin.hs-boot
+@@ -0,0 +1,5 @@
++module Splices.Plugin where
++
++import {-# SOURCE #-} Plugins
++
++staticPlugin :: StaticPlugin
+diff --git a/compiler/ghc-external-splices-plugin/src/Splices/Serialise/Class.hs b/compiler/ghc-external-splices-plugin/src/Splices/Serialise/Class.hs
+new file mode 100644
+index 0000000..fda6d0f
+--- /dev/null
++++ b/compiler/ghc-external-splices-plugin/src/Splices/Serialise/Class.hs
+@@ -0,0 +1,161 @@
++{-# LANGUAGE DefaultSignatures, FlexibleContexts, FlexibleInstances #-}
++{-# LANGUAGE DataKinds, PolyKinds, TypeFamilies, TypeOperators #-}
++{-# LANGUAGE KindSignatures, ScopedTypeVariables, TypeApplications #-}
++{-# LANGUAGE BangPatterns, UndecidableInstances #-}
++module Splices.Serialise.Class where
++
++import GhcPrelude
++
++import Binary
++import Control.Monad
++import Control.Monad.IO.Class
++import Data.Bits
++import Data.ByteString (ByteString)
++import Data.Kind
++import Data.Proxy
++import Data.Word
++import GHC.Generics
++import GHC.TypeLits
++
++import Splices.Conversions
++
++-- * 'Serialise' class
++
++class Serialise a where
++  sput :: BinHandle -> a -> Conv ()
++  default sput :: (Generic a, GSerialise (Rep a)) => BinHandle -> a -> Conv ()
++  sput bh a = gput bh (from a)
++
++  sget :: BinHandle -> Conv a
++  default sget :: (Generic a, GSerialise (Rep a)) => BinHandle -> Conv a
++  sget bh = to <$> gget bh
++
++instance (Serialise a, Serialise b) => Serialise (a, b)
++instance (Serialise a, Serialise b, Serialise c)
++      => Serialise (a, b, c)
++
++instance (Serialise a, Serialise b) => Serialise (Either a b)
++instance Serialise a => Serialise (Maybe a)
++instance Serialise Bool
++
++instance Serialise a => Serialise [a] where
++  sput bh xs = do
++    sput bh (ViaBinary $ length xs)
++    mapM_ (sput bh) xs
++
++  sget bh = do
++    ViaBinary (n :: Int) <- sget bh
++    replicateM n (sget bh)
++
++-- via Binary instance
++
++newtype ViaBinary a = ViaBinary a
++
++instance Binary a => Serialise (ViaBinary a) where
++  sput bh (ViaBinary a) = liftRn $ liftIO (put_ bh a)
++  sget bh = fmap ViaBinary . liftRn $ liftIO (get bh)
++
++binsput :: Binary a => BinHandle -> a -> Conv ()
++binsput bh a = sput bh (ViaBinary a)
++
++binsget :: Binary a => BinHandle -> Conv a
++binsget bh = do
++  ViaBinary a <- sget bh
++  return a
++
++putTag :: BinHandle -> Word16 -> Conv ()
++putTag bh w = sput bh (ViaBinary w)
++
++getTag :: BinHandle -> Conv Word16
++getTag bh = do
++  ViaBinary w <- sget bh
++  return w
++
++instance Serialise Int where
++  sput = binsput
++  sget = binsget
++
++instance Serialise Integer where
++  sput = binsput
++  sget = binsget
++
++instance Serialise Char where
++  sput = binsput
++  sget = binsget
++
++instance Serialise ByteString where
++  sput = binsput
++  sget = binsget
++
++-- generic derivation of Serialise
++
++class GSerialise f where
++  gput :: BinHandle -> f p -> Conv ()
++  gget :: BinHandle -> Conv (f p)
++
++instance (GSerialise l, GSerialise r) => GSerialise (l :*: r) where
++  gput bh (l :*: r) = gput bh l *> gput bh r
++  gget bh = (:*:) <$> gget bh <*> gget bh
++
++instance GSerialise f => GSerialise (M1 i c f) where
++  gput bh (M1 f) = gput bh f
++  gget bh = M1 <$> gget bh
++
++instance Serialise a => GSerialise (K1 i a) where
++  gput bh (K1 a) = sput bh a
++  gget bh = K1 <$> sget bh
++
++instance (GSerialiseSum l, GSerialiseSum r, SumSize l ~ nl, SumSize r ~ nr, KnownNat (nl+nr))
++      => GSerialise (l :+: r) where
++  gput bh lr = gputSum_ bh lr . fromIntegral $ natVal (Proxy @(nl+nr))
++  gget bh = ggetSum_ bh . fromIntegral $ natVal (Proxy @(nl+nr))
++
++instance GSerialise U1 where
++  gput _ _ = pure ()
++  gget _ = pure U1
++
++instance GSerialise V1 where
++  gput _ _ = pure ()
++  gget _ = error "GSerialise.gget @V1"
++
++-- utilities
++
++type family SumSize (f :: k -> Type) :: Nat where
++  SumSize (l :+: r)  = SumSize l + SumSize r
++  SumSize (M1 C c a) = 1
++
++type family SumSize' (f :: k -> Type) :: Nat where
++  SumSize' (l :+: r) = SumSize l + SumSize r
++  SumSize' (M1 C c a) = 1
++  SumSize' (M1 D c a) = SumSize' a
++
++gputSum_
++  :: GSerialiseSum f => BinHandle -> f p -> Word16 -> Conv ()
++gputSum_ bh a sz = gputSum bh a 0 sz
++
++ggetSum_
++  :: GSerialiseSum f => BinHandle -> Word16 -> Conv (f p)
++ggetSum_ bh sz = do
++  ViaBinary tag <- sget bh :: Conv (ViaBinary Word16)
++  ggetSum bh tag sz
++
++class GSerialiseSum f where
++  gputSum :: BinHandle -> f p -> Word16 -> Word16 -> Conv ()
++  ggetSum :: BinHandle -> Word16 -> Word16 -> Conv (f p)
++
++instance GSerialise f => GSerialiseSum (M1 C c f) where
++  gputSum bh f code _ = sput bh (ViaBinary code) >> gput bh f
++  ggetSum bh _ _ = gget bh
++
++instance (GSerialiseSum l, GSerialiseSum r) => GSerialiseSum (l :+: r) where
++  gputSum bh lr !code !sz = case lr of
++    L1 l -> gputSum bh l code sizeL
++    R1 r -> gputSum bh r (code + sizeL) sizeR
++    where sizeL = sz `shiftR` 1
++          sizeR = sz - sizeL
++
++  ggetSum bh !code !sz
++    | code < sizeL = L1 <$> ggetSum bh code sizeL
++    | otherwise    = R1 <$> ggetSum bh (code - sizeL) sizeR
++    where sizeL = sz `shiftR` 1
++          sizeR = sz - sizeL
+diff --git a/compiler/ghc-external-splices-plugin/src/Splices/Serialise/Instances.hs b/compiler/ghc-external-splices-plugin/src/Splices/Serialise/Instances.hs
+new file mode 100644
+index 0000000..6833350
+--- /dev/null
++++ b/compiler/ghc-external-splices-plugin/src/Splices/Serialise/Instances.hs
+@@ -0,0 +1,1008 @@
++{-# LANGUAGE FlexibleInstances, ScopedTypeVariables #-}
++{-# LANGUAGE DeriveGeneric, StandaloneDeriving #-}
++{-# OPTIONS_GHC -fno-warn-orphans #-}
++module Splices.Serialise.Instances where
++
++import GhcPrelude
++
++import Bag
++import BasicTypes
++import BooleanFormula
++import CoreSyn
++import CostCentre
++import FastString
++import ForeignCall
++import GHC.Hs.Binds
++import GHC.Hs.Decls
++import GHC.Hs.Doc
++import GHC.Hs.Expr
++import GHC.Hs.Extension
++import GHC.Hs.Lit
++import GHC.Hs.Pat
++import GHC.Hs.Types
++import IfaceType
++import Module
++import Name
++import Outputable
++import RdrName
++import SrcLoc
++import TcEvidence
++import Unique
++
++import Splices.Conversions
++import Splices.Serialise.Class
++
++import GHC.Generics (Generic)
++import GHC.Real
++
++deriving instance Generic NoExtField
++instance Serialise NoExtField
++
++deriving instance Generic NoExtCon
++instance Serialise NoExtCon
++
++instance Serialise (HsExpr GhcPs) where
++  sput bh expr = case expr of
++    HsVar a b -> do
++      putTag bh 0
++      sput bh a >> sput bh b
++    HsRecFld a b -> do
++      putTag bh 1
++      sput bh a >> sput bh b
++    HsOverLabel a b c -> do
++      putTag bh 2
++      sput bh a >> sput bh b >> sput bh c
++    HsIPVar a b -> do
++      putTag bh 3
++      sput bh a >> sput bh b
++    HsOverLit a b -> do
++      putTag bh 4
++      sput bh a >> sput bh b
++    HsLit a b -> do
++      putTag bh 5
++      sput bh a >> sput bh b
++    HsLam a b -> do
++      putTag bh 6
++      sput bh a >> sput bh b
++    HsLamCase a b -> do
++      putTag bh 7
++      sput bh a >> sput bh b
++    HsApp a b c -> do
++      putTag bh 8
++      sput bh a >> sput bh b >> sput bh c
++    HsAppType a b c -> do
++      putTag bh 9
++      sput bh a >> sput bh b >> sput bh c
++    OpApp a b c d -> do
++      putTag bh 10
++      sput bh a >> sput bh b >> sput bh c >> sput bh d
++    NegApp a b c -> do
++      putTag bh 11
++      sput bh a >> sput bh b >> sput bh c
++    HsPar a b -> do
++      putTag bh 12
++      sput bh a >> sput bh b
++    SectionL a b c -> do
++      putTag bh 13
++      sput bh a >> sput bh b >> sput bh c
++    SectionR a b c -> do
++      putTag bh 14
++      sput bh a >> sput bh b >> sput bh c
++    ExplicitTuple a b c -> do
++      putTag bh 15
++      sput bh a >> sput bh b >> sput bh c
++    ExplicitSum a b c d -> do
++      putTag bh 16
++      sput bh a >> sput bh b >> sput bh c >> sput bh d
++    HsCase a b c -> do
++      putTag bh 17
++      sput bh a >> sput bh b >> sput bh c
++    HsIf a b c d e -> do
++      putTag bh 18
++      sput bh a >> sput bh b >> sput bh c >> sput bh d >> sput bh e
++    HsMultiIf a b -> do
++      putTag bh 19
++      sput bh a >> sput bh b
++    HsLet a b c -> do
++      putTag bh 20
++      sput bh a >> sput bh b >> sput bh c
++    HsDo a b c -> do
++      putTag bh 21
++      sput bh a >> sput bh b >> sput bh c
++    ExplicitList a b c -> do
++      putTag bh 22
++      sput bh a >> sput bh b >> sput bh c
++    RecordCon a b c -> do
++      putTag bh 23
++      sput bh a >> sput bh b >> sput bh c
++    RecordUpd a b c -> do
++      putTag bh 24
++      sput bh a >> sput bh b >> sput bh c
++    ExprWithTySig a b c -> do
++      putTag bh 25
++      sput bh a >> sput bh b >> sput bh c
++    ArithSeq a b c -> do
++      putTag bh 26
++      sput bh a >> sput bh b >> sput bh c
++    HsSCC a b c d -> do
++      putTag bh 27
++      sput bh a >> sput bh b >> sput bh c >> sput bh d
++    HsCoreAnn a b c d -> do
++      putTag bh 28
++      sput bh a >> sput bh b >> sput bh c >> sput bh d
++    HsBracket a b -> do
++      putTag bh 29
++      sput bh a >> sput bh b
++    HsSpliceE a b -> do
++      putTag bh 30
++      sput bh a >> sput bh b
++    HsProc a b c -> do
++      putTag bh 31
++      sput bh a >> sput bh b >> sput bh c
++    HsStatic a b -> do
++      putTag bh 32
++      sput bh a >> sput bh b
++    HsTick a b c -> do
++      putTag bh 33
++      sput bh a >> sput bh b >> sput bh c
++    HsBinTick a b c d -> do
++      putTag bh 34
++      sput bh a >> sput bh b >> sput bh c >> sput bh d
++    HsTickPragma a b c d e -> do
++      putTag bh 35
++      sput bh a >> sput bh b >> sput bh c >> sput bh d >> sput bh e
++    XExpr a -> do
++      putTag bh 36
++      sput bh a
++
++    HsUnboundVar {} -> unsupported "HsUnboundVar" "HsExpr" (ppr expr)
++    HsConLikeOut {} -> unsupported "HsConLikeOut" "HsExpr" (ppr expr)
++    HsRnBracketOut {} -> unsupported "HsRnBracketOut" "HsExpr" (ppr expr)
++    HsTcBracketOut {} -> unsupported "HsTcBracketOut" "HsExpr" (ppr expr)
++    HsWrap {} -> unsupported "HsWrap" "HsExpr" (ppr expr)
++
++  sget bh = do
++    tag <- getTag bh
++    case tag of
++      0 -> HsVar <$> sget bh <*> sget bh
++      1 -> HsRecFld <$> sget bh <*> sget bh
++      2 -> HsOverLabel <$> sget bh <*> sget bh <*> sget bh
++      3 -> HsIPVar <$> sget bh <*> sget bh
++      4 -> HsOverLit <$> sget bh <*> sget bh
++      5 -> HsLit <$> sget bh <*> sget bh
++      6 -> HsLam <$> sget bh <*> sget bh
++      7 -> HsLamCase <$> sget bh <*> sget bh
++      8 -> HsApp <$> sget bh <*> sget bh <*> sget bh
++      9 -> HsAppType <$> sget bh <*> sget bh <*> sget bh
++      10 -> OpApp <$> sget bh <*> sget bh <*> sget bh <*> sget bh
++      11 -> NegApp <$> sget bh <*> sget bh <*> sget bh
++      12 -> HsPar <$> sget bh <*> sget bh
++      13 -> SectionL <$> sget bh <*> sget bh <*> sget bh
++      14 -> SectionR <$> sget bh <*> sget bh <*> sget bh
++      15 -> ExplicitTuple <$> sget bh <*> sget bh <*> sget bh
++      16 -> ExplicitSum <$> sget bh <*> sget bh <*> sget bh <*> sget bh
++      17 -> HsCase <$> sget bh <*> sget bh <*> sget bh
++      18 -> HsIf <$> sget bh <*> sget bh <*> sget bh <*> sget bh <*> sget bh
++      19 -> HsMultiIf <$> sget bh <*> sget bh
++      20 -> HsLet <$> sget bh <*> sget bh <*> sget bh
++      21 -> HsDo <$> sget bh <*> sget bh <*> sget bh
++      22 -> ExplicitList <$> sget bh <*> sget bh <*> sget bh
++      23 -> RecordCon <$> sget bh <*> sget bh <*> sget bh
++      24 -> RecordUpd <$> sget bh <*> sget bh <*> sget bh
++      25 -> ExprWithTySig <$> sget bh <*> sget bh <*> sget bh
++      26 -> ArithSeq <$> sget bh <*> sget bh <*> sget bh
++      27 -> HsSCC <$> sget bh <*> sget bh <*> sget bh <*> sget bh
++      28 -> HsCoreAnn <$> sget bh <*> sget bh <*> sget bh <*> sget bh
++      29 -> HsBracket <$> sget bh <*> sget bh
++      30 -> HsSpliceE <$> sget bh <*> sget bh
++      31 -> HsProc <$> sget bh <*> sget bh <*> sget bh
++      32 -> HsStatic <$> sget bh <*> sget bh
++      33 -> HsTick <$> sget bh <*> sget bh <*> sget bh
++      34 -> HsBinTick <$> sget bh <*> sget bh <*> sget bh <*> sget bh
++      35 -> HsTickPragma <$> sget bh <*> sget bh <*> sget bh <*> sget bh <*> sget bh
++      36 -> XExpr <$> sget bh
++      n -> badTag "HsExpr" n
++
++deriving instance Generic a => Generic (MatchGroup GhcPs a)
++instance (Generic a, Serialise a) => Serialise (MatchGroup GhcPs a)
++
++deriving instance Generic (GenLocated l e)
++instance (Serialise l, Serialise e) => Serialise (GenLocated l e)
++
++deriving instance Generic (Match GhcPs a)
++instance Serialise a => Serialise (Match GhcPs a)
++
++instance Serialise SrcSpan where
++  sput = binsput
++  sget = binsget
++
++deriving instance Generic Origin
++instance Serialise Origin
++
++deriving instance Generic (StmtLR GhcPs GhcPs a)
++instance Serialise a => Serialise (StmtLR GhcPs GhcPs a)
++
++deriving instance Generic (GRHSs GhcPs a)
++instance Serialise a => Serialise (GRHSs GhcPs a)
++
++deriving instance Generic (GRHS GhcPs a)
++instance Serialise a => Serialise (GRHS GhcPs a)
++
++deriving instance Generic (HsLocalBindsLR GhcPs GhcPs)
++instance Serialise (HsLocalBindsLR GhcPs GhcPs)
++
++instance Serialise (HsValBindsLR GhcPs GhcPs) where
++  sput bh binds = case binds of
++    ValBinds a b c -> sput bh a >> sput bh b >> sput bh c
++    XValBindsLR {} -> unsupported "XValBindsLR" "HsValBindsLR" (ppr binds)
++  sget bh = ValBinds <$> sget bh <*> sget bh <*> sget bh
++
++deriving instance Generic (HsIPBinds GhcPs)
++instance Serialise (HsIPBinds GhcPs)
++
++deriving instance Generic (IPBind GhcPs)
++instance Serialise (IPBind GhcPs)
++
++deriving instance Generic HsIPName
++instance Serialise HsIPName
++
++instance Serialise FastString where
++  sput = binsput
++  sget = binsget
++
++instance Serialise HsDocString where
++  sput = binsput
++  sget = binsget
++
++deriving instance Generic PromotionFlag
++instance Serialise PromotionFlag
++
++deriving instance Generic HsTupleSort
++instance Serialise HsTupleSort
++
++deriving instance Generic HsSrcBang
++instance Serialise HsSrcBang
++
++deriving instance Generic HsTyLit
++instance Serialise HsTyLit
++
++deriving instance Generic Boxity
++instance Serialise Boxity
++
++deriving instance Generic (ParStmtBlock GhcPs GhcPs)
++instance Serialise (ParStmtBlock GhcPs GhcPs)
++
++instance Serialise (SyntaxExpr GhcPs) where
++  sput bh (SyntaxExpr a [] WpHole) = sput bh a
++  sput _ _ = badInput "SyntaxExpr with non-WpHole wrapper"
++  sget bh = SyntaxExpr <$> sget bh <*> pure [] <*> pure WpHole
++
++instance Serialise a => Serialise (Bag a) where
++  sput bh bag = sput bh (bagToList bag)
++  sget bh = listToBag <$> sget bh
++
++instance Serialise RdrName where
++  sput bh n = case n of
++    Unqual a -> putTag bh 0 >> sput bh a
++    Qual a b -> putTag bh 1 >> sput bh a >> sput bh b
++    Orig a b -> putTag bh 2 >> sput bh a >> sput bh b
++    Exact a
++      | isExternalName a -> putTag bh 3 >> sput bh a
++      | otherwise -> putTag bh (if isSystemName a then 4 else 5)
++                  >> sput bh (nameUnique a)
++                  >> sput bh (nameOccName a)
++                  >> sput bh (nameSrcSpan a)
++
++  sget bh = do
++    tag <- getTag bh
++    case tag of
++      0 -> Unqual <$> sget bh
++      1 -> Qual <$> sget bh <*> sget bh
++      2 -> tweakOrig =<< (Orig <$> sget bh <*> sget bh)
++      3 -> Exact <$> sget bh
++      4 -> fmap Exact (mkSystemNameAt <$> sget bh <*> sget bh <*> sget bh)
++      5 -> fmap Exact (mkInternalName <$> sget bh <*> sget bh <*> sget bh)
++      n -> badTag "RdrName" n
++
++    where tweakOrig :: RdrName -> Conv RdrName
++          tweakOrig n = convertName (SeName n)
++
++instance Serialise Name where
++  sput = binsput
++  sget = binsget
++
++instance Serialise Unique where
++  sput bh u = sput bh (getKey u)
++  sget bh = mkUniqueGrimily <$> sget bh
++
++instance Serialise OccName where
++  sput = binsput
++  sget = binsget
++
++instance Serialise ModuleName where
++  sput = binsput
++  sget = binsget
++
++instance Serialise Module where
++  sput = binsput
++  sget = binsget
++
++instance Serialise (HsBindLR GhcPs GhcPs) where
++  sput bh bind = case bind of
++    FunBind a b c d _e -> case d of
++      WpHole -> do
++        putTag bh 0
++        sput bh a >> sput bh b >> sput bh c
++      _ -> badInput "FunBind with HsWrapper that's not WpHole"
++    PatBind a b c _d -> do
++      putTag bh 1
++      sput bh a >> sput bh b >> sput bh c
++    VarBind a b c d -> do
++      putTag bh 2
++      sput bh a >> sput bh b >> sput bh c >> sput bh d
++    PatSynBind a b -> do
++      putTag bh 3
++      sput bh a >> sput bh b
++    XHsBindsLR a -> do
++      putTag bh 4
++      sput bh a
++    AbsBinds {} -> unsupported "AbsBinds" "HsBindLR" (ppr bind)
++
++  sget bh = do
++    tag <- getTag bh
++    case tag of
++      0 -> FunBind <$> sget bh <*> sget bh <*> sget bh
++                   <*> pure WpHole <*> pure []
++      1 -> PatBind <$> sget bh <*> sget bh <*> sget bh
++                   <*> pure ([], [])
++      2 -> VarBind <$> sget bh <*> sget bh <*> sget bh <*> sget bh
++      3 -> PatSynBind <$> sget bh <*> sget bh
++      4 -> XHsBindsLR <$> sget bh
++      n -> badTag "HsBindLR" n
++
++deriving instance Generic (HsStmtContext a)
++instance Serialise a => Serialise (HsStmtContext a)
++
++deriving instance Generic (HsMatchContext a)
++instance Serialise a => Serialise (HsMatchContext a)
++
++deriving instance Generic LexicalFixity
++instance Serialise LexicalFixity
++
++instance Serialise SrcStrictness where
++  sput = binsput
++  sget = binsget
++
++deriving instance Generic (FieldOcc GhcPs)
++instance Serialise (FieldOcc GhcPs)
++
++deriving instance Generic (HsRecField' a b)
++instance (Serialise a, Serialise b) => Serialise (HsRecField' a b)
++
++deriving instance Generic (HsRecFields GhcPs a)
++instance Serialise a => Serialise (HsRecFields GhcPs a)
++
++deriving instance Generic (HsWildCardBndrs GhcPs a)
++instance Serialise a => Serialise (HsWildCardBndrs GhcPs a)
++
++deriving instance Generic (HsImplicitBndrs GhcPs a)
++instance Serialise a => Serialise (HsImplicitBndrs GhcPs a)
++
++deriving instance Generic (AmbiguousFieldOcc GhcPs)
++instance Serialise (AmbiguousFieldOcc GhcPs)
++
++deriving instance Generic (PatSynBind GhcPs GhcPs)
++instance Serialise (PatSynBind GhcPs GhcPs)
++
++deriving instance Generic (HsConDetails a b)
++instance (Serialise a, Serialise b) => Serialise (HsConDetails a b)
++
++deriving instance Generic (RecordPatSynField a)
++instance Serialise a => Serialise (RecordPatSynField a)
++
++deriving instance Generic (HsOverLit GhcPs)
++instance Serialise (HsOverLit GhcPs)
++
++deriving instance Generic OverLitVal
++instance Serialise OverLitVal
++
++deriving instance Generic IntegralLit
++instance Serialise IntegralLit
++
++deriving instance Generic FractionalLit
++instance Serialise FractionalLit
++
++deriving instance Generic (Ratio a)
++instance Serialise a => Serialise (Ratio a)
++
++instance Serialise SourceText where
++  sput = binsput
++  sget = binsget
++
++deriving instance Generic (Pat GhcPs)
++instance Serialise (Pat GhcPs) where
++  sput bh pat = case pat of
++    WildPat a -> do
++      putTag bh 0
++      sput bh a
++    VarPat a b -> do
++      putTag bh 1
++      sput bh a >> sput bh b
++    LazyPat a b -> do
++      putTag bh 2
++      sput bh a >> sput bh b
++    AsPat a b c -> do
++      putTag bh 3
++      sput bh a >> sput bh b >> sput bh c
++    ParPat a b -> do
++      putTag bh 4
++      sput bh a >> sput bh b
++    BangPat a b -> do
++      putTag bh 5
++      sput bh a >> sput bh b
++    ListPat a b -> do
++      putTag bh 6
++      sput bh a >> sput bh b
++    TuplePat a b c -> do
++      putTag bh 7
++      sput bh a >> sput bh b >> sput bh c
++    SumPat a b c d -> do
++      putTag bh 8
++      sput bh a >> sput bh b >> sput bh c >> sput bh d
++    ConPatIn a b -> do
++      putTag bh 9
++      sput bh a >> sput bh b
++    ViewPat a b c -> do
++      putTag bh 10
++      sput bh a >> sput bh b >> sput bh c
++    SplicePat a b -> do
++      putTag bh 11
++      sput bh a >> sput bh b
++    LitPat a b -> do
++      putTag bh 12
++      sput bh a >> sput bh b
++    NPat a b c d -> do
++      putTag bh 13
++      sput bh a >> sput bh b >> sput bh c >> sput bh d
++    NPlusKPat a b c d e f -> do
++      putTag bh 14
++      sput bh a >> sput bh b >> sput bh c >> sput bh d
++      sput bh e >> sput bh f
++    SigPat a b c -> do
++      putTag bh 15
++      sput bh a >> sput bh b >> sput bh c
++    XPat a -> do
++      putTag bh 16
++      sput bh a
++
++    CoPat {} -> unsupported "CoPat" "Pat" (ppr pat)
++    ConPatOut {} -> unsupported "ConPatOut" "Pat" (ppr pat)
++
++  sget bh = do
++    tag <- getTag bh
++    case tag of
++      0 -> WildPat <$> sget bh
++      1 -> VarPat <$> sget bh <*> sget bh
++      2 -> LazyPat <$> sget bh <*> sget bh
++      3 -> AsPat <$> sget bh <*> sget bh <*> sget bh
++      4 -> ParPat <$> sget bh <*> sget bh
++      5 -> BangPat <$> sget bh <*> sget bh
++      6 -> ListPat <$> sget bh <*> sget bh
++      7 -> TuplePat <$> sget bh <*> sget bh <*> sget bh
++      8 -> SumPat <$> sget bh <*> sget bh <*> sget bh <*> sget bh
++      9 -> ConPatIn <$> sget bh <*> sget bh
++      10 -> ViewPat <$> sget bh <*> sget bh <*> sget bh
++      11 -> SplicePat <$> sget bh <*> sget bh
++      12 -> LitPat <$> sget bh <*> sget bh
++      13 -> NPat <$> sget bh <*> sget bh <*> sget bh <*> sget bh
++      14 -> NPlusKPat <$> sget bh <*> sget bh <*> sget bh
++                      <*> sget bh <*> sget bh <*> sget bh
++      15 -> SigPat <$> sget bh <*> sget bh <*> sget bh
++      16 -> XPat <$> sget bh
++      n -> badTag "Pat" n
++
++deriving instance Generic SpliceDecoration
++instance Serialise SpliceDecoration
++
++deriving instance Generic (HsSplicedThing GhcPs)
++instance Serialise (HsSplicedThing GhcPs)
++
++deriving instance Generic (HsSplice GhcPs)
++instance Serialise (HsSplice GhcPs) where
++  sput bh s = case s of
++    HsTypedSplice a b c d -> do
++      putTag bh 0
++      sput bh a >> sput bh b >> sput bh c >> sput bh d
++    HsUntypedSplice a b c d -> do
++      putTag bh 1
++      sput bh a >> sput bh b >> sput bh c >> sput bh d
++    HsQuasiQuote a b c d e -> do
++      putTag bh 2
++      sput bh a >> sput bh b >> sput bh c >> sput bh d >> sput bh e
++    XSplice _ ->
++      putTag bh 3
++    HsSpliced {} -> unsupported "HsSpliced" "HsSplice" (ppr s)
++    HsSplicedT {} -> unsupported "HsSplicedT" "HsSplice" (ppr s)
++  sget bh = do
++    tag <- getTag bh
++    case tag of
++      0 -> HsTypedSplice <$> sget bh <*> sget bh <*> sget bh <*> sget bh
++      1 -> HsUntypedSplice <$> sget bh <*> sget bh <*> sget bh <*> sget bh
++      2 -> HsQuasiQuote <$> sget bh <*> sget bh <*> sget bh <*> sget bh
++                        <*> sget bh
++      3 -> pure $ XSplice (error "sget @HsSplice: NoExtCon in XSplice")
++      n -> badTag "HsSplice" n
++
++instance Serialise IfaceType where
++  sput = binsput
++  sget = binsget
++
++deriving instance Generic ForallVisFlag
++instance Serialise ForallVisFlag
++
++deriving instance Generic (HsType GhcPs)
++instance Serialise (HsType GhcPs) where
++  sput bh ty = case ty of
++    HsForAllTy a b c d -> do
++      putTag bh 0
++      sput bh a >> sput bh b >> sput bh c >> sput bh d
++    HsQualTy a b c -> do
++      putTag bh 1
++      sput bh a >> sput bh b >> sput bh c
++    HsTyVar a b c -> do
++      putTag bh 2
++      sput bh a >> sput bh b >> sput bh c
++    HsAppTy a b c -> do
++      putTag bh 3
++      sput bh a >> sput bh b >> sput bh c
++    HsAppKindTy a b c -> do
++      putTag bh 4
++      sput bh a >> sput bh b >> sput bh c
++    HsFunTy a b c -> do
++      putTag bh 5
++      sput bh a >> sput bh b >> sput bh c
++    HsListTy a b -> do
++      putTag bh 6
++      sput bh a >> sput bh b
++    HsTupleTy a b c -> do
++      putTag bh 7
++      sput bh a >> sput bh b >> sput bh c
++    HsSumTy a b -> do
++      putTag bh 8
++      sput bh a >> sput bh b
++    HsOpTy a b c d -> do
++      putTag bh 9
++      sput bh a >> sput bh b >> sput bh c >> sput bh d
++    HsParTy a b -> do
++      putTag bh 10
++      sput bh a >> sput bh b
++    HsIParamTy a b c -> do
++      putTag bh 11
++      sput bh a >> sput bh b >> sput bh c
++    HsStarTy a b -> do
++      putTag bh 12
++      sput bh a >> sput bh b
++    HsKindSig a b c -> do
++      putTag bh 13
++      sput bh a >> sput bh b >> sput bh c
++    HsSpliceTy a b -> do
++      putTag bh 14
++      sput bh a >> sput bh b
++    HsDocTy a b c -> do
++      putTag bh 15
++      sput bh a >> sput bh b >> sput bh c
++    HsBangTy a b c -> do
++      putTag bh 16
++      sput bh a >> sput bh b >> sput bh c
++    HsRecTy a b -> do
++      putTag bh 17
++      sput bh a >> sput bh b
++    HsExplicitListTy a b c -> do
++      putTag bh 18
++      sput bh a >> sput bh b >> sput bh c
++    HsExplicitTupleTy a b -> do
++      putTag bh 19
++      sput bh a >> sput bh b
++    HsTyLit a b -> do
++      putTag bh 20
++      sput bh a >> sput bh b
++    HsWildCardTy a -> do
++      putTag bh 21
++      sput bh a
++    t@(XHsType _) -> unsupported "HsType" "XHsType" (ppr t)
++
++  sget bh = do
++    tag <- getTag bh
++    case tag of
++      0 -> HsForAllTy <$> sget bh <*> sget bh <*> sget bh <*> sget bh
++      1 -> HsQualTy <$> sget bh <*> sget bh <*> sget bh
++      2 -> HsTyVar <$> sget bh <*> sget bh <*> sget bh
++      3 -> HsAppTy <$> sget bh <*> sget bh <*> sget bh
++      4 -> HsAppKindTy <$> sget bh <*> sget bh <*> sget bh
++      5 -> HsFunTy <$> sget bh <*> sget bh <*> sget bh
++      6 -> HsListTy <$> sget bh <*> sget bh
++      7 -> HsTupleTy <$> sget bh <*> sget bh <*> sget bh
++      8 -> HsSumTy <$> sget bh <*> sget bh
++      9 -> HsOpTy <$> sget bh <*> sget bh <*> sget bh <*> sget bh
++      10 -> HsParTy <$> sget bh <*> sget bh
++      11 -> HsIParamTy <$> sget bh <*> sget bh <*> sget bh
++      12 -> HsStarTy <$> sget bh <*> sget bh
++      13 -> HsKindSig <$> sget bh <*> sget bh <*> sget bh
++      14 -> HsSpliceTy <$> sget bh <*> sget bh
++      15 -> HsDocTy <$> sget bh <*> sget bh <*> sget bh
++      16 -> HsBangTy <$> sget bh <*> sget bh <*> sget bh
++      17 -> HsRecTy <$> sget bh <*> sget bh
++      18 -> HsExplicitListTy <$> sget bh <*> sget bh <*> sget bh
++      19 -> HsExplicitTupleTy <$> sget bh <*> sget bh
++      20 -> HsTyLit <$> sget bh <*> sget bh
++      21 -> HsWildCardTy <$> sget bh
++      n  -> badTag "HsType" n
++
++deriving instance Generic (HsTyVarBndr GhcPs)
++instance Serialise (HsTyVarBndr GhcPs)
++
++deriving instance Generic (ConDeclField GhcPs)
++instance Serialise (ConDeclField GhcPs)
++
++instance Serialise (HsLit GhcPs) where
++  sput bh l = case l of
++    HsChar a b -> putTag bh 0 >> sput bh a >> sput bh b
++    HsCharPrim a b -> putTag bh 1 >> sput bh a >> sput bh b
++    HsString a b -> putTag bh 2 >> sput bh a >> sput bh b
++    HsStringPrim a b -> putTag bh 3 >> sput bh a >> sput bh b
++    HsInt a b -> putTag bh 4 >> sput bh a >> sput bh b
++    HsIntPrim a b -> putTag bh 5 >> sput bh a >> sput bh b
++    HsWordPrim a b -> putTag bh 6 >> sput bh a >> sput bh b
++    HsInt64Prim a b -> putTag bh 7 >> sput bh a >> sput bh b
++    HsWord64Prim a b -> putTag bh 8 >> sput bh a >> sput bh b
++    HsInteger a b ty -> do
++      ty' :: IfaceType <- convertType ty
++      putTag bh 9
++      sput bh a >> sput bh b >> sput bh ty'
++    HsRat a b ty -> do
++      ty' :: IfaceType <- convertType ty
++      putTag bh 10
++      sput bh a >> sput bh b >> sput bh ty'
++    HsFloatPrim a b -> putTag bh 11 >> sput bh a >> sput bh b
++    HsDoublePrim a b -> putTag bh 12 >> sput bh a >> sput bh b
++    XLit _ -> putTag bh 13
++
++  sget bh = do
++    tag <- getTag bh
++    case tag of
++      0 -> HsChar <$> sget bh <*> sget bh
++      1 -> HsCharPrim <$> sget bh <*> sget bh
++      2 -> HsString <$> sget bh <*> sget bh
++      3 -> HsStringPrim <$> sget bh <*> sget bh
++      4 -> HsInt <$> sget bh <*> sget bh
++      5 -> HsIntPrim <$> sget bh <*> sget bh
++      6 -> HsWordPrim <$> sget bh <*> sget bh
++      7 -> HsInt64Prim <$> sget bh <*> sget bh
++      8 -> HsWord64Prim <$> sget bh <*> sget bh
++      9 -> do a <- sget bh
++              b <- sget bh
++              ty :: IfaceType <- sget bh
++              ty' <- convertType ty
++              return (HsInteger a b ty')
++      10 -> do a <- sget bh
++               b <- sget bh
++               ty :: IfaceType <- sget bh
++               ty' <- convertType ty
++               return (HsRat a b ty')
++      11 -> HsFloatPrim <$> sget bh <*> sget bh
++      12 -> HsDoublePrim <$> sget bh <*> sget bh
++      13 -> pure $ XLit (error "sget @HsLit: NoExtCon in XLit")
++      n  -> badTag "HsLit" n
++
++deriving instance Generic (HsPatSynDir GhcPs)
++instance Serialise (HsPatSynDir GhcPs)
++
++deriving instance Generic SrcUnpackedness
++instance Serialise SrcUnpackedness
++
++deriving instance Generic (HsTupArg GhcPs)
++instance Serialise (HsTupArg GhcPs)
++
++deriving instance Generic (ApplicativeArg GhcPs)
++instance Serialise (ApplicativeArg GhcPs)
++
++deriving instance Generic TransForm
++instance Serialise TransForm
++
++deriving instance Generic (ArithSeqInfo GhcPs)
++instance Serialise (ArithSeqInfo GhcPs)
++
++deriving instance Generic (Tickish a)
++instance Serialise a => Serialise (Tickish a)
++
++instance Serialise RealSrcSpan where
++  sput = binsput
++  sget = binsget
++
++instance Serialise CostCentre where
++  sput = binsput
++  sget = binsget
++
++deriving instance Generic (HsBracket GhcPs)
++instance Serialise (HsBracket GhcPs)
++
++deriving instance Generic (StandaloneKindSig GhcPs)
++instance Serialise (StandaloneKindSig GhcPs)
++
++deriving instance Generic (HsDecl GhcPs)
++instance Serialise (HsDecl GhcPs)
++
++instance Serialise (Sig GhcPs) where
++  sput bh s = case s of
++    TypeSig a b c -> do
++      putTag bh 0
++      sput bh a >> sput bh b >> sput bh c
++    PatSynSig a b c -> do
++      putTag bh 1
++      sput bh a >> sput bh b >> sput bh c
++    ClassOpSig a b c d -> do
++      putTag bh 2
++      sput bh a >> sput bh b >> sput bh c >> sput bh d
++    FixSig a b -> do
++      putTag bh 3
++      sput bh a >> sput bh b
++    InlineSig a b c -> do
++      putTag bh 4
++      sput bh a >> sput bh b >> sput bh c
++    SpecSig a b c d -> do
++      putTag bh 5
++      sput bh a >> sput bh b >> sput bh c >> sput bh d
++    SpecInstSig a b c -> do
++      putTag bh 6
++      sput bh a >> sput bh b >> sput bh c
++    MinimalSig a b c -> do
++      putTag bh 7
++      sput bh a >> sput bh b >> sput bh c
++    SCCFunSig a b c d -> do
++      putTag bh 8
++      sput bh a >> sput bh b >> sput bh c >> sput bh d
++    CompleteMatchSig a b c d -> do
++      putTag bh 9
++      sput bh a >> sput bh b >> sput bh c >> sput bh d
++
++    XSig {} -> unsupported "XSig" "IdSig" (ppr s)
++    IdSig {} -> unsupported "Sig" "IdSig" (ppr s)
++
++  sget bh = do
++    tag <- getTag bh
++    case tag of
++      0 -> TypeSig <$> sget bh <*> sget bh <*> sget bh
++      1 -> PatSynSig <$> sget bh <*> sget bh <*> sget bh
++      2 -> ClassOpSig <$> sget bh <*> sget bh <*> sget bh <*> sget bh
++      3 -> FixSig <$> sget bh <*> sget bh
++      4 -> InlineSig <$> sget bh <*> sget bh <*> sget bh
++      5 -> SpecSig <$> sget bh <*> sget bh <*> sget bh <*> sget bh
++      6 -> SpecInstSig <$> sget bh <*> sget bh <*> sget bh
++      7 -> MinimalSig <$> sget bh <*> sget bh <*> sget bh
++      8 -> SCCFunSig <$> sget bh <*> sget bh <*> sget bh <*> sget bh
++      9 -> CompleteMatchSig <$> sget bh <*> sget bh <*> sget bh <*> sget bh
++      n -> badTag "Sig" n
++
++deriving instance Generic Fixity
++instance Serialise Fixity
++
++deriving instance Generic FixityDirection
++instance Serialise FixityDirection
++
++deriving instance Generic (FixitySig GhcPs)
++instance Serialise (FixitySig GhcPs)
++
++deriving instance Generic (BooleanFormula a)
++instance Serialise a => Serialise (BooleanFormula a)
++
++deriving instance Generic StringLiteral
++instance Serialise StringLiteral
++
++deriving instance Generic InlinePragma
++instance Serialise InlinePragma
++
++deriving instance Generic InlineSpec
++instance Serialise InlineSpec
++
++deriving instance Generic Activation
++instance Serialise Activation
++
++deriving instance Generic RuleMatchInfo
++instance Serialise RuleMatchInfo
++
++deriving instance Generic (TyClDecl GhcPs)
++instance Serialise (TyClDecl GhcPs)
++
++deriving instance Generic (FamEqn GhcPs a)
++instance Serialise a => Serialise (FamEqn GhcPs a)
++
++deriving instance Generic (FamilyDecl GhcPs)
++instance Serialise (FamilyDecl GhcPs)
++
++deriving instance Generic (FamilyInfo GhcPs)
++instance Serialise (FamilyInfo GhcPs)
++
++deriving instance Generic (HsArg a b)
++instance (Serialise a, Serialise b) => Serialise (HsArg a b)
++
++deriving instance Generic (LHsQTyVars GhcPs)
++instance Serialise (LHsQTyVars GhcPs)
++
++deriving instance Generic (FamilyResultSig GhcPs)
++instance Serialise (FamilyResultSig GhcPs)
++
++deriving instance Generic (InjectivityAnn GhcPs)
++instance Serialise (InjectivityAnn GhcPs)
++
++deriving instance Generic (HsDataDefn GhcPs)
++instance Serialise (HsDataDefn GhcPs)
++
++deriving instance Generic (ConDecl GhcPs)
++instance Serialise (ConDecl GhcPs)
++
++deriving instance Generic (HsDerivingClause GhcPs)
++instance Serialise (HsDerivingClause GhcPs)
++
++deriving instance Generic (DerivStrategy GhcPs)
++instance Serialise (DerivStrategy GhcPs)
++
++deriving instance Generic NewOrData
++instance Serialise NewOrData
++
++deriving instance Generic CType
++instance Serialise CType
++
++deriving instance Generic Header
++instance Serialise Header
++
++deriving instance Generic DocDecl
++instance Serialise DocDecl
++
++deriving instance Generic (InstDecl GhcPs)
++instance Serialise (InstDecl GhcPs)
++
++deriving instance Generic (ClsInstDecl GhcPs)
++instance Serialise (ClsInstDecl GhcPs)
++
++deriving instance Generic (TyFamInstDecl GhcPs)
++instance Serialise (TyFamInstDecl GhcPs)
++
++deriving instance Generic (DataFamInstDecl GhcPs)
++instance Serialise (DataFamInstDecl GhcPs)
++
++deriving instance Generic OverlapMode
++instance Serialise OverlapMode
++
++deriving instance Generic (DerivDecl GhcPs)
++instance Serialise (DerivDecl GhcPs)
++
++deriving instance Generic (DefaultDecl GhcPs)
++instance Serialise (DefaultDecl GhcPs)
++
++deriving instance Generic (ForeignDecl GhcPs)
++instance Serialise (ForeignDecl GhcPs)
++
++deriving instance Generic ForeignImport
++instance Serialise ForeignImport
++
++deriving instance Generic ForeignExport
++instance Serialise ForeignExport
++
++deriving instance Generic CCallConv
++instance Serialise CCallConv
++
++deriving instance Generic Safety
++instance Serialise Safety
++
++deriving instance Generic CImportSpec
++instance Serialise CImportSpec
++
++deriving instance Generic CExportSpec
++instance Serialise CExportSpec
++
++deriving instance Generic CCallTarget
++instance Serialise CCallTarget
++
++instance Serialise UnitId where
++  sput = binsput
++  sget = binsget
++
++deriving instance Generic (WarnDecls GhcPs)
++instance Serialise (WarnDecls GhcPs)
++
++deriving instance Generic (WarnDecl GhcPs)
++instance Serialise (WarnDecl GhcPs)
++
++deriving instance Generic WarningTxt
++instance Serialise WarningTxt
++
++deriving instance Generic (AnnDecl GhcPs)
++instance Serialise (AnnDecl GhcPs)
++
++deriving instance Generic (AnnProvenance a)
++instance Serialise a => Serialise (AnnProvenance a)
++
++deriving instance Generic (RuleDecls GhcPs)
++instance Serialise (RuleDecls GhcPs)
++
++deriving instance Generic (RuleDecl GhcPs)
++instance Serialise (RuleDecl GhcPs)
++
++deriving instance Generic (RuleBndr GhcPs)
++instance Serialise (RuleBndr GhcPs)
++
++deriving instance Generic (SpliceDecl GhcPs)
++instance Serialise (SpliceDecl GhcPs)
++
++deriving instance Generic SpliceExplicitFlag
++instance Serialise SpliceExplicitFlag
++
++deriving instance Generic (RoleAnnotDecl GhcPs)
++instance Serialise (RoleAnnotDecl GhcPs)
++
++deriving instance Generic Role
++instance Serialise Role
++
++deriving instance Generic (HsGroup GhcPs)
++instance Serialise (HsGroup GhcPs)
++
++deriving instance Generic (TyClGroup GhcPs)
++instance Serialise (TyClGroup GhcPs)
++
++instance Serialise (HsCmd GhcPs) where
++  sput bh cmd = case cmd of
++    HsCmdArrApp a b c d e -> do
++      putTag bh 0
++      sput bh a >> sput bh b >> sput bh c >> sput bh d >> sput bh e
++    HsCmdArrForm a b c d e -> do
++      putTag bh 1
++      sput bh a >> sput bh b >> sput bh c >> sput bh d >> sput bh e
++    HsCmdApp a b c -> do
++      putTag bh 2
++      sput bh a >> sput bh b >> sput bh c
++    HsCmdLam a b -> do
++      putTag bh 3
++      sput bh a >> sput bh b
++    HsCmdPar a b -> do
++      putTag bh 4
++      sput bh a >> sput bh b
++    HsCmdCase a b c -> do
++      putTag bh 5
++      sput bh a >> sput bh b >> sput bh c
++    HsCmdIf a b c d e -> do
++      putTag bh 6
++      sput bh a >> sput bh b >> sput bh c >> sput bh d >> sput bh e
++    HsCmdLet a b c -> do
++      putTag bh 7
++      sput bh a >> sput bh b >> sput bh c
++    HsCmdDo a b -> do
++      putTag bh 8
++      sput bh a >> sput bh b
++    XCmd a -> do
++      putTag bh 9
++      sput bh a
++    HsCmdWrap {} -> unsupported "HsCmdWrap" "HsCmd" (ppr cmd)
++
++  sget bh = do
++    tag <- getTag bh
++    case tag of
++      0 -> HsCmdArrApp <$> sget bh <*> sget bh <*> sget bh
++                       <*> sget bh <*> sget bh
++      1 -> HsCmdArrForm <$> sget bh <*> sget bh <*> sget bh
++                        <*> sget bh <*> sget bh
++      2 -> HsCmdApp <$> sget bh <*> sget bh <*> sget bh
++      3 -> HsCmdLam <$> sget bh <*> sget bh
++      4 -> HsCmdPar <$> sget bh <*> sget bh
++      5 -> HsCmdCase <$> sget bh <*> sget bh <*> sget bh
++      6 -> HsCmdIf <$> sget bh <*> sget bh <*> sget bh
++                   <*> sget bh <*> sget bh
++      7 -> HsCmdLet <$> sget bh <*> sget bh <*> sget bh
++      8 -> HsCmdDo <$> sget bh <*> sget bh
++      9 -> XCmd <$> sget bh
++      n -> badTag "HsCmd" n
++
++deriving instance Generic (HsCmdTop GhcPs)
++instance Serialise (HsCmdTop GhcPs)
++
++deriving instance Generic HsArrAppType
++instance Serialise HsArrAppType
+diff --git a/compiler/ghc-external-splices-plugin/test-pkg/CHANGELOG.md b/compiler/ghc-external-splices-plugin/test-pkg/CHANGELOG.md
+new file mode 100644
+index 0000000..7df34b1
+--- /dev/null
++++ b/compiler/ghc-external-splices-plugin/test-pkg/CHANGELOG.md
+@@ -0,0 +1,5 @@
++# Revision history for test-pkg
++
++## 0.1 -- YYYY-mm-dd
++
++* First version. Released on an unsuspecting world.
+diff --git a/compiler/ghc-external-splices-plugin/test-pkg/LICENSE b/compiler/ghc-external-splices-plugin/test-pkg/LICENSE
+new file mode 100644
+index 0000000..4c19542
+--- /dev/null
++++ b/compiler/ghc-external-splices-plugin/test-pkg/LICENSE
+@@ -0,0 +1,30 @@
++Copyright (c) 2019, Alp Mestanogullari
++
++All rights reserved.
++
++Redistribution and use in source and binary forms, with or without
++modification, are permitted provided that the following conditions are met:
++
++    * Redistributions of source code must retain the above copyright
++      notice, this list of conditions and the following disclaimer.
++
++    * Redistributions in binary form must reproduce the above
++      copyright notice, this list of conditions and the following
++      disclaimer in the documentation and/or other materials provided
++      with the distribution.
++
++    * Neither the name of Alp Mestanogullari nor the names of other
++      contributors may be used to endorse or promote products derived
++      from this software without specific prior written permission.
++
++THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
++LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
++A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
++OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
++SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
++LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
++DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
++THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
++(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
++OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+diff --git a/compiler/ghc-external-splices-plugin/test-pkg/Main.hs b/compiler/ghc-external-splices-plugin/test-pkg/Main.hs
+new file mode 100644
+index 0000000..722db80
+--- /dev/null
++++ b/compiler/ghc-external-splices-plugin/test-pkg/Main.hs
+@@ -0,0 +1,11 @@
++{-# LANGUAGE TemplateHaskell #-}
++module Main where
++
++data Foo = A Int | B Char
++
++[d| instance Show Foo where
++      show (A i) = show i
++      show (B c) = show c   |]
++
++main :: IO ()
++main = print $([|A 1|])
+diff --git a/compiler/ghc-external-splices-plugin/test-pkg/Setup.hs b/compiler/ghc-external-splices-plugin/test-pkg/Setup.hs
+new file mode 100644
+index 0000000..9a994af
+--- /dev/null
++++ b/compiler/ghc-external-splices-plugin/test-pkg/Setup.hs
+@@ -0,0 +1,2 @@
++import Distribution.Simple
++main = defaultMain
+diff --git a/compiler/ghc-external-splices-plugin/test-pkg/test-pkg.cabal b/compiler/ghc-external-splices-plugin/test-pkg/test-pkg.cabal
+new file mode 100644
+index 0000000..7456786
+--- /dev/null
++++ b/compiler/ghc-external-splices-plugin/test-pkg/test-pkg.cabal
+@@ -0,0 +1,26 @@
++cabal-version:       >=1.10
++-- Initial package description 'test-pkg.cabal' generated by 'cabal init'.
++--   For further documentation, see http://haskell.org/cabal/users-guide/
++
++name:                test-pkg
++version:             0.1
++-- synopsis:
++-- description:
++-- bug-reports:
++license:             BSD3
++license-file:        LICENSE
++author:              Alp Mestanogullari
++maintainer:          alp@well-typed.com
++-- copyright:
++category:            Testing
++build-type:          Simple
++extra-source-files:  CHANGELOG.md
++
++executable test-pkg
++  main-is:             Main.hs
++  -- other-modules:
++  -- other-extensions:
++  build-depends:       base,
++                       ghc-external-splices-plugin
++  -- hs-source-dirs:
++  default-language:    Haskell2010
+diff --git a/compiler/ghc.cabal.in b/compiler/ghc.cabal.in
+index f717513217..1fe25fefc0 100644
+--- a/compiler/ghc.cabal.in
++++ b/compiler/ghc.cabal.in
+@@ -192,6 +192,14 @@ Library
+         types
+         utils
+         hieFile
++        ghc-external-splices-plugin/src
++
++    Other-Modules:
++        Splices.Plugin
++        Splices.Data
++        Splices.Conversions
++        Splices.Serialise.Class
++        Splices.Serialise.Instances
+ 
+     -- we use an explicit Prelude
+     Default-Extensions:
+diff --git a/compiler/main/DynFlags.hs b/compiler/main/DynFlags.hs
+index d222b3b6de..98fdbd64c1 100644
+--- a/compiler/main/DynFlags.hs
++++ b/compiler/main/DynFlags.hs
+@@ -328,6 +328,8 @@ import qualified GHC.LanguageExtensions as LangExt
+ import Foreign (Ptr)
+ #endif
+ 
++import {-# SOURCE #-} qualified Splices.Plugin
++
+ -- Note [Updating flag description in the User's Guide]
+ -- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ --
+@@ -2012,7 +2014,7 @@ defaultDynFlags mySettings llvmConfig =
+         pluginModNameOpts       = [],
+         frontendPluginOpts      = [],
+         cachedPlugins           = [],
+-        staticPlugins           = [],
++        staticPlugins           = [Splices.Plugin.staticPlugin],
+         hooks                   = emptyHooks,
+ 
+         outputFile              = Nothing,
+@@ -4602,6 +4604,7 @@ defaultFlags settings
+       Opt_KeepHiFiles,
+       Opt_KeepOFiles,
+       Opt_OmitYields,
++      Opt_PluginTrustworthy, -- For external splices plugin, when building the compiler itself
+       Opt_PrintBindContents,
+       Opt_ProfCountEntries,
+       Opt_SharedImplib,
+diff --git a/compiler/main/DynamicLoading.hs b/compiler/main/DynamicLoading.hs
+index 265cef390b..59845d7c26 100644
+--- a/compiler/main/DynamicLoading.hs
++++ b/compiler/main/DynamicLoading.hs
+@@ -67,7 +67,7 @@ initializePlugins hsc_env df
+      && all (\p -> paArguments (lpPlugin p)
+                        == argumentsForPlugin p (pluginModNameOpts df))
+             (cachedPlugins df) -- arguments not changed
+-  = return df -- no need to reload plugins
++  = withPlugins df runDflagsPlugin df -- make sure we runDflagsPlugin for static plugins
+   | otherwise
+   = do loadedPlugins <- loadPlugins (hsc_env { hsc_dflags = df })
+        let df' = df { cachedPlugins = loadedPlugins }
+diff --git a/llvm-targets b/llvm-targets
+index 4f9e6c5e5b..74f7a757a3 100644
+--- a/llvm-targets
++++ b/llvm-targets
+@@ -39,6 +39,7 @@
+ ,("arm64-apple-darwin", ("e-m:o-i64:64-i128:128-n32:64-S128", "apple-a7", "+fp-armv8 +neon +crypto +zcm +zcz +sha2 +aes"))
+ ,("aarch64-apple-darwin", ("e-m:o-i64:64-i128:128-n32:64-S128", "apple-a7", "+fp-armv8 +neon +crypto +zcm +zcz +sha2 +aes"))
+ ,("armv7-apple-ios", ("e-m:o-p:32:32-Fi8-f64:32:64-v64:32:64-v128:32:128-a:0:32-n32-S32", "generic", ""))
++,("arm64-apple-ios", ("e-m:o-i64:64-i128:128-n32:64-S128", "apple-a7", "+fp-armv8 +neon +crypto +zcm +zcz +sha2 +aes"))
+ ,("aarch64-apple-ios", ("e-m:o-i64:64-i128:128-n32:64-S128", "apple-a7", "+fp-armv8 +neon +crypto +zcm +zcz +sha2 +aes"))
+ ,("i386-apple-ios", ("e-m:o-p:32:32-p270:32:32-p271:32:32-p272:64:64-f64:32:64-f80:128-n8:16:32-S128", "yonah", ""))
+ ,("x86_64-apple-ios", ("e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-f80:128-n8:16:32:64-S128", "core2", ""))
+diff --git a/rts/Adjustor.c b/rts/Adjustor.c
+index 7fc931344c..76fc19f0e1 100644
+--- a/rts/Adjustor.c
++++ b/rts/Adjustor.c
+@@ -39,6 +39,7 @@ Haskell side.
+ #include "PosixSource.h"
+ #include "Rts.h"
+ 
++#include "sm/Storage.h"
+ #include "RtsUtils.h"
+ #include "StablePtr.h"
+ 
+diff --git a/rts/posix/GetTime.c b/rts/posix/GetTime.c
+index 7d53f95401..99db256f0c 100644
+--- a/rts/posix/GetTime.c
++++ b/rts/posix/GetTime.c
+@@ -25,7 +25,7 @@
+ #error No implementation for getProcessCPUTime() available.
+ #endif
+ 
+-#if defined(darwin_HOST_OS)
++#if defined(darwin_HOST_OS) || defined(ios_HOST_OS)
+ #include <mach/mach_time.h>
+ #include <mach/mach_init.h>
+ #include <mach/thread_act.h>
+@@ -36,14 +36,14 @@
+ // we'll implement getProcessCPUTime() and getProcessElapsedTime()
+ // separately, using getrusage() and gettimeofday() respectively
+ 
+-#if defined(darwin_HOST_OS)
++#if defined(darwin_HOST_OS) || defined(ios_HOST_OS)
+ static uint64_t timer_scaling_factor_numer = 0;
+ static uint64_t timer_scaling_factor_denom = 0;
+ #endif
+ 
+ void initializeTimer()
+ {
+-#if defined(darwin_HOST_OS)
++#if defined(darwin_HOST_OS) || defined(ios_HOST_OS)
+     mach_timebase_info_data_t info;
+     (void) mach_timebase_info(&info);
+     timer_scaling_factor_numer = (uint64_t)info.numer;
+@@ -70,7 +70,7 @@ Time getCurrentThreadCPUTime(void)
+     // N.B. Since macOS Catalina, Darwin supports clock_gettime but does not
+     // support clock_getcpuclockid. Hence we prefer to use the Darwin-specific
+     // path on Darwin, even if clock_gettime is available.
+-#if defined(darwin_HOST_OS)
++#if defined(darwin_HOST_OS) || defined(ios_HOST_OS)
+     thread_basic_info_data_t info = { };
+     mach_msg_type_number_t info_count = THREAD_BASIC_INFO_COUNT;
+     kern_return_t kern_err = thread_info(mach_thread_self(), THREAD_BASIC_INFO,
+@@ -137,7 +137,7 @@ StgWord64 getMonotonicNSec(void)
+ #if defined(HAVE_CLOCK_GETTIME)
+     return getClockTime(CLOCK_ID);
+ 
+-#elif defined(darwin_HOST_OS)
++#elif defined(darwin_HOST_OS) || defined(ios_HOST_OS)
+ 
+     uint64_t time = mach_absolute_time();
+     return (time * timer_scaling_factor_numer) / timer_scaling_factor_denom;
+diff --git a/rts/posix/OSThreads.c b/rts/posix/OSThreads.c
+index cacb829921..86bd06ad94 100644
+--- a/rts/posix/OSThreads.c
++++ b/rts/posix/OSThreads.c
+@@ -151,7 +151,7 @@ createOSThread (OSThreadId* pId, char *name STG_UNUSED,
+ #elif defined(HAVE_PTHREAD_SETNAME_NP)
+     pthread_setname_np(*pId, name);
+ #elif defined(HAVE_PTHREAD_SETNAME_NP_DARWIN)
+-    pthread_setname_np(name);
++    /* pthread_setname_np(name); */
+ #endif
+   }
+   return result;
+diff --git a/rts/posix/itimer/Pthread.c b/rts/posix/itimer/Pthread.c
+index 738e5ec469..858cdc23b0 100644
+--- a/rts/posix/itimer/Pthread.c
++++ b/rts/posix/itimer/Pthread.c
+@@ -210,7 +210,7 @@ initTicker (Time interval, TickProc handle_tick)
+ #elif defined(HAVE_PTHREAD_SETNAME_NP)
+         pthread_setname_np(thread, "ghc_ticker");
+ #elif defined(HAVE_PTHREAD_SETNAME_NP_DARWIN)
+-        pthread_setname_np("ghc_ticker");
++        /* pthread_setname_np("ghc_ticker"); */
+ #endif
+     } else {
+         barf("Itimer: Failed to spawn thread: %s", strerror(errno));
+diff --git a/rts/sm/Storage.c b/rts/sm/Storage.c
+index 72fabe309f..cdfd5fc3a1 100644
+--- a/rts/sm/Storage.c
++++ b/rts/sm/Storage.c
+@@ -1644,7 +1644,7 @@ void freeExec (AdjustorExecutable addr)
+     RELEASE_SM_LOCK
+ }
+ 
+-#elif defined(USE_LIBFFI_FOR_ADJUSTORS) && defined(darwin_HOST_OS)
++#elif defined(USE_LIBFFI_FOR_ADJUSTORS) && (defined(ios_HOST_OS) || defined(darwin_HOST_OS))
+ 
+ static HashTable* allocatedExecs;
+ 
+diff --git a/rts/sm/Storage.h b/rts/sm/Storage.h
+index ab629d0602..108d45bf8a 100644
+--- a/rts/sm/Storage.h
++++ b/rts/sm/Storage.h
+@@ -25,6 +25,10 @@ void freeStorage(bool free_heap);
+ // and initialises other storage-related things.
+ void storageAddCapabilities (uint32_t from, uint32_t to);
+ 
++#if defined(ios_HOST_OS) || defined(darwin_HOST_OS)
++AdjustorWritable execToWritable(AdjustorExecutable exec);
++#endif
++
+ /* -----------------------------------------------------------------------------
+    The storage manager mutex
+    -------------------------------------------------------------------------- */
