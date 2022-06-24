@@ -1,3 +1,4 @@
+Submodule compiler/ghc-external-splices-plugin 0000000000...6ed9ad67af (new submodule)
 diff --git a/compiler/ghc-external-splices-plugin/CHANGELOG.md b/compiler/ghc-external-splices-plugin/CHANGELOG.md
 new file mode 100644
 index 0000000..415cdd6
