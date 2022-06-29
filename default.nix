@@ -52,9 +52,9 @@
   # TODO: possibly add a way for user to provide own patches?
   # NOTE: patchGHC usage:
   # patchGhc (ghc.package);
-  patchGHC = ghc:
+  patchGHC = ghc: ver:
     ghc.overrideAttrs (old: {
-      patches = (old.patches or [ ]) ++ [ ./patches/${ghc.name}/splices.patch ];
+      patches = (old.patches or [ ]) ++ [ ./patches/${ver}/splices.patch ];
     });
 
   patchGHCJS = ghcjs: ghcjs.override {
