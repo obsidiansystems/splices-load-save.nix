@@ -54,4 +54,8 @@
     ghc.overrideAttrs (old: {
       patches = (old.patches or [ ]) ++ [ ./patches/${ghc.name}/splices.patch ];
     });
+
+  patchGHCJS = ghcjs: ghcjs.override {
+    ghcjsSrcJson = ./patches/ghcjs/git.json;
+  };
 }
