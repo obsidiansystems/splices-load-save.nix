@@ -54,7 +54,7 @@
   # patchGhc (ghc.package);
   patchGHC = ghc: ver:
     ghc.overrideAttrs (old: {
-      patches = (old.patches or [ ]) ++ [
+      patches = [
         (./. + "/patches/${ver}/splices.patch")
       ];
     });
