@@ -35,6 +35,7 @@
   };
 
   # NOTE: GHC 8.10.*+ supports "external" plugins, enable the flag
+  # NOTE: Use this for GHCJS
   loadSplices8_10 = splicedpkgs: import ./load-splices.nix {
     inherit haskellLib lib fetchFromGitHub;
     isExternalPlugin = true;
@@ -42,6 +43,7 @@
   };
 
   # NOTE: Same for any version of GHC with the splices plugin
+  # NOTE: Pass a version string or "pkgs.haskell.compiler.ghc*.version"
   saveSplices = ghc: import ./save-splices.nix {
     inherit haskellLib lib fetchFromGitHub;
     ghcVersion = ghc;
