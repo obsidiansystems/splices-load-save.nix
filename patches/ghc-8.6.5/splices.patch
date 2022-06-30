@@ -1,3 +1,26 @@
+diff --git a/aclocal.m4 b/aclocal.m4
+index 6eda094315..2158097046 100644
+--- a/aclocal.m4
++++ b/aclocal.m4
+@@ -1332,16 +1332,15 @@ AC_DEFUN([FP_GCC_SUPPORTS_NO_PIE],
+ [
+    AC_REQUIRE([AC_PROG_CC])
+    AC_MSG_CHECKING([whether GCC supports -no-pie])
+-   echo 'int main() { return 0; }' > conftest.c
+    # Some GCC versions only warn when passed an unrecognized flag.
+-   if $CC -no-pie -Werror -x c /dev/null -dM -E > conftest.txt 2>&1 && ! grep -i unrecognized conftest.txt > /dev/null 2>&1; then
++   if $CC -no-pie -Wall -x c /dev/null -dM -E > conftest.txt 2>&1 && ! grep -i unrecognized conftest.txt > /dev/null 2>&1; then
+        CONF_GCC_SUPPORTS_NO_PIE=YES
+        AC_MSG_RESULT([yes])
+    else
+        CONF_GCC_SUPPORTS_NO_PIE=NO
+        AC_MSG_RESULT([no])
+    fi
+-   rm -f conftest.c conftest.o conftest
++   rm -f conftest.txt
+ ])
+ 
+ dnl Small feature test for perl version. Assumes PerlCmd
 diff --git a/compiler/basicTypes/DataCon.hs b/compiler/basicTypes/DataCon.hs
 index 3dd7e14b12..efcb26d047 100644
 --- a/compiler/basicTypes/DataCon.hs
@@ -540,10 +563,10 @@ index 109e9814e5..4b8c15dfc8 100644
  
 diff --git a/compiler/hsSyn/HsExprBin.hs b/compiler/hsSyn/HsExprBin.hs
 new file mode 100644
-index 0000000000..7967f934fb
+index 0000000000..1cc77688d5
 --- /dev/null
 +++ b/compiler/hsSyn/HsExprBin.hs
-@@ -0,0 +1,149 @@
+@@ -0,0 +1,176 @@
 +module HsExprBin
 +  ( getModuleSplicesPath
 +  , whenSet
@@ -555,8 +578,12 @@ index 0000000000..7967f934fb
 +  , lookupSpliceResult
 +  , exprSE2PS
 +  , declSE2PS
++  , patSE2PS
++  , tySE2PS
 +  , exprPS2SE
 +  , declPS2SE
++  , patPS2SE
++  , tyPS2SE
 +  , handleUnsupported
 +  ) where
 +
@@ -569,6 +596,8 @@ index 0000000000..7967f934fb
 +import qualified HsExprBin_ConversionPS2SE as PS2SE
 +import HsExprBin_Instances ()
 +import HsExtension
++import HsPat
++import HsTypes
 +import Module
 +import Outputable
 +import SrcLoc
@@ -626,17 +655,22 @@ index 0000000000..7967f934fb
 +data SpliceResult
 +  = SRExpr  (LHsExpr GhcSe)
 +  | SRDecls [LHsDecl GhcSe] -- TODO: change to HsGroup ?
-+  -- TODO: add patterns and types?
++  | SRPat   (LPat GhcSe)
++  | SRTy    (LHsType GhcSe)
 +
 +instance Binary SpliceResult where
 +  put_ bh r = case r of
 +    SRExpr e -> putByte bh 0 >> put_ bh e
 +    SRDecls ds -> putByte bh 1 >> put_ bh ds
++    SRPat p -> putByte bh 2 >> put_ bh p
++    SRTy t  -> putByte bh 3 >> put_ bh t
 +  get bh = do
 +    tag <- getByte bh
 +    case tag of
 +      0 -> SRExpr <$> get bh
 +      1 -> SRDecls <$> get bh
++      2 -> SRPat <$> get bh
++      3 -> SRTy <$> get bh
 +      _ -> panic "Binary SpliceResult: unknown tag"
 +
 +instance Binary HsSpliceData where
@@ -661,6 +695,14 @@ index 0000000000..7967f934fb
 +declSE2PS :: LHsDecl GhcSe -> RnM (ConvResult (LHsDecl GhcPs))
 +declSE2PS = runConv . SE2PS.cvLHsDecl
 +
++-- | Convert a serialisable pattern AST to a parsed pattern AST
++patSE2PS :: LPat GhcSe -> RnM (ConvResult (LPat GhcPs))
++patSE2PS = runConv . SE2PS.cvLHsPat
++
++-- | Convert a serialisable type AST to a parsed type ST
++tySE2PS :: LHsType GhcSe -> RnM (ConvResult (LHsType GhcPs))
++tySE2PS = runConv . SE2PS.cvLHsType
++
 +-- Converting Ps -> Se
 +
 +-- | Convert a parsed expression AST to a serialisable expression AST
@@ -670,6 +712,14 @@ index 0000000000..7967f934fb
 +-- | Convert a parsed declaration AST to a serialisable expression AST
 +declPS2SE :: LHsDecl GhcPs -> RnM (ConvResult (LHsDecl GhcSe))
 +declPS2SE = runConv . PS2SE.cvLHsDecl
++
++-- | Convert a serialisable pattern AST to a parsed pattern AST
++patPS2SE :: LPat GhcPs -> RnM (ConvResult (LPat GhcSe))
++patPS2SE = runConv . PS2SE.cvLHsPat
++
++-- | Convert a serialisable type AST to a parsed type ST
++tyPS2SE :: LHsType GhcPs -> RnM (ConvResult (LHsType GhcSe))
++tyPS2SE = runConv . PS2SE.cvLHsType
 +
 +-- * Error reporting
 +
@@ -706,10 +756,10 @@ index 0000000000..964847e097
 \ No newline at end of file
 diff --git a/compiler/hsSyn/HsExprBin_ConversionPS2SE.hs b/compiler/hsSyn/HsExprBin_ConversionPS2SE.hs
 new file mode 100644
-index 0000000000..839564fbfe
+index 0000000000..19458d047e
 --- /dev/null
 +++ b/compiler/hsSyn/HsExprBin_ConversionPS2SE.hs
-@@ -0,0 +1,812 @@
+@@ -0,0 +1,818 @@
 +{-# LANGUAGE GADTs #-}
 +module HsExprBin_ConversionPS2SE where
 +
@@ -1200,6 +1250,9 @@ index 0000000000..839564fbfe
 +   <$> convertName b <*> traverse (traverse cvPat) c <*> cvGRHSs f d
 +cvMatch _ (XMatch a) = pure (XMatch a)
 +
++cvLHsPat :: LPat GhcPs -> Conv (LPat GhcSe)
++cvLHsPat = traverse cvPat
++
 +cvPat :: Pat GhcPs -> Conv (Pat GhcSe)
 +cvPat (WildPat a) = pure (WildPat a)
 +cvPat (VarPat a b) = VarPat a <$> convertName b
@@ -1416,6 +1469,9 @@ index 0000000000..839564fbfe
 +cvHsImplicitBndrs f (HsIB a b) = HsIB a <$> f b
 +cvHsImplicitBndrs _ (XHsImplicitBndrs a) = pure (XHsImplicitBndrs a)
 +
++cvLHsType :: Traversable t => t (HsType GhcPs) -> Conv (t (HsType GhcSe))
++cvLHsType = traverse cvType
++
 +cvType :: HsType GhcPs -> Conv (HsType GhcSe)
 +cvType (HsForAllTy a b c) = HsForAllTy a
 +  <$> traverse (traverse cvHsTyVarBndr) b
@@ -1524,10 +1580,10 @@ index 0000000000..839564fbfe
 +  <$> cvMatchGroup cvLHsExpr a
 diff --git a/compiler/hsSyn/HsExprBin_ConversionSE2PS.hs b/compiler/hsSyn/HsExprBin_ConversionSE2PS.hs
 new file mode 100644
-index 0000000000..8fbc941a71
+index 0000000000..cf39727f10
 --- /dev/null
 +++ b/compiler/hsSyn/HsExprBin_ConversionSE2PS.hs
-@@ -0,0 +1,813 @@
+@@ -0,0 +1,819 @@
 +{-# LANGUAGE GADTs #-}
 +module HsExprBin_ConversionSE2PS where
 +
@@ -2019,6 +2075,9 @@ index 0000000000..8fbc941a71
 +   <$> convertName b <*> traverse (traverse cvPat) c <*> cvGRHSs f d
 +cvMatch _ (XMatch a) = pure (XMatch a)
 +
++cvLHsPat :: LPat GhcSe -> Conv (LPat GhcPs)
++cvLHsPat = traverse cvPat
++
 +cvPat :: Pat GhcSe -> Conv (Pat GhcPs)
 +cvPat (WildPat a) = pure (WildPat a)
 +cvPat (VarPat a b) = VarPat a <$> convertName b
@@ -2234,6 +2293,9 @@ index 0000000000..8fbc941a71
 +  -> Conv (HsImplicitBndrs GhcPs thing')
 +cvHsImplicitBndrs f (HsIB a b) = HsIB a <$> f b
 +cvHsImplicitBndrs _ (XHsImplicitBndrs a) = pure (XHsImplicitBndrs a)
++
++cvLHsType :: LHsType GhcSe -> Conv (LHsType GhcPs)
++cvLHsType = traverse cvType
 +
 +cvType :: HsType GhcSe -> Conv (HsType GhcPs)
 +cvType (HsForAllTy a b c) = HsForAllTy a
@@ -4787,8 +4849,38 @@ index 5a7f761d32..15a19b117f 100644
                0 -> return VanillaDM
                _ -> do { t <- get bh; return (GenericDM t) }
 +-}
+diff --git a/compiler/main/DriverPipeline.hs b/compiler/main/DriverPipeline.hs
+index 92e3455521..4fc4e463bb 100644
+--- a/compiler/main/DriverPipeline.hs
++++ b/compiler/main/DriverPipeline.hs
+@@ -256,16 +256,23 @@ compileOne' m_tc_result mHscMessage
+                   then gopt_set dflags0 Opt_BuildDynamicToo
+                   else dflags0
+ 
++       -- #16331 - when no "internal interpreter" is available but we
++       -- need to process some TemplateHaskell or QuasiQuotes, we automatically
++       -- turn on -fexternal-interpreter.
++       dflags2 = if not internalInterpreter && needsLinker
++                 then gopt_set dflags1 Opt_ExternalInterpreter
++                 else dflags1
++
+        basename = dropExtension input_fn
+ 
+        -- We add the directory in which the .hs files resides) to the import
+        -- path.  This is needed when we try to compile the .hc file later, if it
+        -- imports a _stub.h file that we created here.
+        current_dir = takeDirectory basename
+-       old_paths   = includePaths dflags1
++       old_paths   = includePaths dflags2
+        prevailing_dflags = hsc_dflags hsc_env0
+        dflags =
+-          dflags1 { includePaths = addQuoteInclude old_paths [current_dir]
++          dflags2 { includePaths = addQuoteInclude old_paths [current_dir]
+                   , log_action = log_action prevailing_dflags }
+                   -- use the prevailing log_action / log_finaliser,
+                   -- not the one cached in the summary.  This is so
 diff --git a/compiler/main/DynFlags.hs b/compiler/main/DynFlags.hs
-index 539132653e..5f217a6a8f 100644
+index 539132653e..31436f5bbe 100644
 --- a/compiler/main/DynFlags.hs
 +++ b/compiler/main/DynFlags.hs
 @@ -916,6 +916,8 @@ data DynFlags = DynFlags {
@@ -4835,6 +4927,24 @@ index 539132653e..5f217a6a8f 100644
    , make_ord_flag defGhcFlag "outputdir"         (hasArg setOutputDir)
    , make_ord_flag defGhcFlag "ddump-file-prefix"
          (hasArg (setDumpPrefixForce . Just))
+@@ -4083,16 +4092,7 @@ supportedLanguageOverlays = map (flagSpecName . snd) safeHaskellFlagsDeps
+ supportedExtensions :: [String]
+ supportedExtensions = concatMap toFlagSpecNamePair xFlags
+   where
+-    toFlagSpecNamePair flg
+-#if !defined(GHCI)
+-      -- IMPORTANT! Make sure that `ghc --supported-extensions` omits
+-      -- "TemplateHaskell"/"QuasiQuotes" when it's known not to work out of the
+-      -- box. See also GHC #11102 and #16331 for more details about
+-      -- the rationale
+-      | flagSpecFlag flg == LangExt.TemplateHaskell  = [noName]
+-      | flagSpecFlag flg == LangExt.QuasiQuotes      = [noName]
+-#endif
+-      | otherwise = [name, noName]
++    toFlagSpecNamePair flg = [name, noName]
+       where
+         noName = "No" ++ name
+         name = flagSpecName flg
 diff --git a/compiler/prelude/PrimOp.hs-boot b/compiler/prelude/PrimOp.hs-boot
 index f10ef44972..6d759bb961 100644
 --- a/compiler/prelude/PrimOp.hs-boot
@@ -5031,7 +5141,7 @@ index 2a4b808f54..08ed9f151d 100644
  
  -- NB: topModIdentity, not topModSemantic!
 diff --git a/compiler/typecheck/TcSplice.hs b/compiler/typecheck/TcSplice.hs
-index 737ddccfbd..c6dd542937 100644
+index 737ddccfbd..7f4064617c 100644
 --- a/compiler/typecheck/TcSplice.hs
 +++ b/compiler/typecheck/TcSplice.hs
 @@ -26,6 +26,7 @@ module TcSplice(
@@ -5098,7 +5208,7 @@ index 737ddccfbd..c6dd542937 100644
  
  defaultRunMeta :: MetaHook TcM
  defaultRunMeta (MetaE r)
-@@ -694,29 +714,110 @@ defaultRunMeta (MetaAW r)
+@@ -694,29 +714,146 @@ defaultRunMeta (MetaAW r)
      -- the toAnnotationWrapper function that we slap around the user's code
  
  ----------------
@@ -5148,6 +5258,22 @@ index 737ddccfbd..c6dd542937 100644
 +     resultDs
 +  modifyHsSpliceData $ recordSpliceResult l (SRDecls serialDecls)
 +
++-- | Record the result (second argument) of evaluating the pattern splice
++--   represented by the first argument.
++addSplicePatResult :: LHsExpr GhcTc -> LPat GhcPs -> TcM ()
++addSplicePatResult th@(L l _) resultE = do
++  serialPat <- handleUnsupported (fmap ppr th) (Just $ ppr resultE)
++            =<< patPS2SE resultE
++  modifyHsSpliceData $ recordSpliceResult l (SRPat serialPat)
++
++-- | Record the result (second argument) of evaluating the type splice
++--   represented by the first argument.
++addSpliceTypeResult :: LHsExpr GhcTc -> LHsType GhcPs -> TcM ()
++addSpliceTypeResult th@(L l _) resultE = do
++  serialTy <- handleUnsupported (fmap ppr th) (Just $ ppr resultE)
++          =<< tyPS2SE resultE
++  modifyHsSpliceData $ recordSpliceResult l (SRTy serialTy)
++
 +-- | Look up the result of evaluating the splice represented by the first
 +--   argument in an .hs-splice file, using the given function to extract
 +--   the result in question (when found).
@@ -5163,15 +5289,39 @@ index 737ddccfbd..c6dd542937 100644
 +getSpliceExprResult :: LHsExpr GhcTc -> TcM (LHsExpr GhcPs)
 +getSpliceExprResult spliceE = getSpliceResult spliceE $ \res -> case res of
 +    SRExpr e  -> exprSE2PS e >>= handleUnsupported (fmap ppr spliceE) Nothing
-+    SRDecls _ -> panic ("Expected an expression splice but found a declaration one")
++    SRPat _   -> expectedFoundSplice "expression" "pattern"
++    SRTy _    -> expectedFoundSplice "expression" "type"
++    SRDecls _ -> expectedFoundSplice "expression" "declarations"
++
++-- | Look up the result of evaluating a pattern splice.
++getSplicePatResult :: LHsExpr GhcTc -> TcM (LPat GhcPs)
++getSplicePatResult spliceE = getSpliceResult spliceE $ \res -> case res of
++    SRPat e   -> patSE2PS e >>= handleUnsupported (fmap ppr spliceE) Nothing
++    SRExpr _  -> expectedFoundSplice "pattern" "expression"
++    SRTy _    -> expectedFoundSplice "pattern" "type"
++    SRDecls _ -> expectedFoundSplice "pattern" "declarations"
++
++-- | Look up the result of evaluating a type splice.
++getSpliceTypeResult :: LHsExpr GhcTc -> TcM (LHsType GhcPs)
++getSpliceTypeResult spliceE = getSpliceResult spliceE $ \res -> case res of
++    SRTy e    -> tySE2PS e >>= handleUnsupported (fmap ppr spliceE) Nothing
++    SRExpr _  -> expectedFoundSplice "type" "expression"
++    SRPat _   -> expectedFoundSplice "type" "pattern"
++    SRDecls _ -> expectedFoundSplice "type" "declarations"
 +
 +-- | Look up the result of evaluating a declaration splice.
 +getSpliceDeclsResult :: LHsExpr GhcTc -> TcM [LHsDecl GhcPs]
 +getSpliceDeclsResult spliceE = getSpliceResult spliceE $ \res -> case res of
-+    SRExpr _   -> panic ("Expected a declaration splice result but found an expression one")
++    SRExpr _   -> expectedFoundSplice "declarations" "expression"
++    SRPat _    -> expectedFoundSplice "declarations" "pattern"
++    SRTy _     -> expectedFoundSplice "delcarations" "type"
 +    SRDecls ds -> traverse
 +      (declSE2PS >=> handleUnsupported (fmap ppr spliceE) Nothing)
 +      ds
++
++expectedFoundSplice :: String -> String -> a
++expectedFoundSplice exp found =
++  panic ("Expected a " ++ exp ++ " splice result but found: " ++ found)
 +
  runMetaAW :: LHsExpr GhcTc         -- Of type AnnotationWrapper
            -> TcM Serialized
@@ -5190,15 +5340,13 @@ index 737ddccfbd..c6dd542937 100644
  
  runMetaP :: LHsExpr GhcTc          -- Of type (Q Pat)
           -> TcM (LPat GhcPs)
- runMetaP = runMeta metaRequestP
-+  (panic "runMetaP doesn't support splice caching (read)")
-+  (panic "runMetaP doesn't support splice caching (write)")
+-runMetaP = runMeta metaRequestP
++runMetaP = runMeta metaRequestP getSplicePatResult addSplicePatResult
  
  runMetaT :: LHsExpr GhcTc          -- Of type (Q Type)
           -> TcM (LHsType GhcPs)
- runMetaT = runMeta metaRequestT
-+  (panic "runMetaT doesn't support splice caching (read)")
-+  (panic "runMetaT doesn't support splice caching (write)")
+-runMetaT = runMeta metaRequestT
++runMetaT = runMeta metaRequestT getSpliceTypeResult addSpliceTypeResult
  
  runMetaD :: LHsExpr GhcTc          -- Of type Q [Dec]
           -> TcM [LHsDecl GhcPs]
@@ -5212,7 +5360,7 @@ index 737ddccfbd..c6dd542937 100644
           -> (SrcSpan -> ForeignHValue -> TcM (Either MsgDoc hs_syn))        -- How to run x
           -> LHsExpr GhcTc        -- Of type x; typically x = Q TH.Exp, or
                                   --    something like that
-@@ -727,7 +828,7 @@ runMeta' show_code ppr_hs run_and_convert expr
+@@ -727,7 +864,7 @@ runMeta' show_code ppr_hs run_and_convert expr
                              -- we catch all kinds of splices and annotations.
  
          -- Check that we've had no errors of any sort so far.
@@ -5546,3 +5694,36 @@ index a80880f4e5..7a7c40ecfc 100644
  equalKeysUFM :: UniqFM a -> UniqFM b -> Bool
  equalKeysUFM (UFM m1) (UFM m2) = liftEq (\_ _ -> True) m1 m2
  
+diff --git a/haddock.diff b/haddock.diff
+new file mode 100644
+index 0000000000..f46c95a5a6
+--- /dev/null
++++ b/haddock.diff
+@@ -0,0 +1,13 @@
++diff --git a/haddock-api/src/Haddock/Types.hs b/haddock-api/src/Haddock/Types.hs
++index a4ef5f82..faa9e1c9 100644
++--- a/haddock-api/src/Haddock/Types.hs
+++++ b/haddock-api/src/Haddock/Types.hs
++@@ -298,7 +298,7 @@ data DocName
++ data DocNameI
++ 
++ type instance IdP DocNameI = DocName
++-
+++type instance RdrOrSeName DocNameI = RdrName
++ 
++ instance NamedThing DocName where
++   getName (Documented name _) = name
+Submodule utils/haddock 15b62fc13e..4f9c0be328:
+diff --git a/utils/haddock/haddock-api/src/Haddock/Types.hs b/utils/haddock/haddock-api/src/Haddock/Types.hs
+index 6da45a3b..71a27b1a 100644
+--- a/utils/haddock/haddock-api/src/Haddock/Types.hs
++++ b/utils/haddock/haddock-api/src/Haddock/Types.hs
+@@ -299,7 +299,7 @@ data DocName
+ data DocNameI
+ 
+ type instance IdP DocNameI = DocName
+-
++type instance RdrOrSeName DocNameI = RdrName
+ 
+ instance NamedThing DocName where
+   getName (Documented name _) = name

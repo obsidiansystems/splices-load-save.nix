@@ -49,6 +49,11 @@
     ghcVersion = ghc;
   };
 
+
+  # Generating patches with git diff for ghc
+  # Make sure to fetch submodules first!
+  # 8.10.7: git diff <commit> <commit> ':!.gitmodules' --submodule=diff
+  # 8.6.5: git diff <commit> <commit> ':!.gitmodules' ':!compiler/parser/Parser.y' --submodule=diff
   # TODO: possibly add a way for user to provide own patches?
   # NOTE: patchGHC usage:
   # patchGhc (ghc.package);
