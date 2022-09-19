@@ -7,6 +7,11 @@ Splices for Haskell, decoupled from reflex-platform, with helper functions in ni
 * Anyone that doesn't need all of the features of reflex-platform, and just needs a relatively easy way to pull up splices on a non-reflex project.
 * Anyone that wants/needs splices for GHCJS
 
+## Caveats
+* Build times are close to double due to having to build most libraries twice
+  * This is mitigated by having a nix cache setup that already has these spliced libraries working
+* More than likely you will have to build GHC
+
 # How to use
 ### GHC & GHCJS:
 ```nix
