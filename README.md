@@ -38,7 +38,7 @@ rec {
     haskell = super.haskell // {
         compiler = super.haskell.compiler // {
             ghcSplices8_10 = (splices-func.patchGHC (self.haskell.compiler.ghc8107) self.haskell.compiler.ghc8107.name);
-            ghcSplices8_10 = (splices-func.patchGHC (self.haskell.compiler.ghc8107) self.haskell.compiler.ghc8107.name);
+            ghcjsSplices8_10 = (splices-func.patchGHCJS self.haskell.compiler.ghcjs810);
         };
 
         packages = super.haskell.packages // {
