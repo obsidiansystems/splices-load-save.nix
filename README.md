@@ -1,15 +1,13 @@
- # splices-load-save.nix
----
+# splices-load-save.nix
 Splices for Haskell, decoupled from reflex-platform, with helper functions in nix, along with patches available for easy patching of GHC
 
 # Overview
----
+
 ## Who Should consider using this?
 * Anyone that doesn't need all of the features of reflex-platform, and just needs a relatively easy way to pull up splices on a non-reflex project.
 * Anyone that wants/needs splices for GHCJS
 
 ## How to use
----
 ### GHC & GHCJS:
 ```nix
 (self: super: let
