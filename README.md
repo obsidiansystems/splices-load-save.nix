@@ -7,17 +7,17 @@ Splices for Haskell, decoupled from reflex-platform, with helper functions in ni
 * Anyone that doesn't need all of the features of reflex-platform, and just needs a relatively easy way to pull up splices on a non-reflex project.
 * Anyone that wants/needs splices for GHCJS
 
-## How to use
+# How to use
 ### GHC & GHCJS:
 ```nix
 (self: super: let
-    foldExtensions = super.lib.foldr super.lib.composeExtensions (_: _: { });
-    splices-load-save-nix = super.fetchFromGitHub {
-        owner = "obsidiansystems";
-        repo = "splices-load-save.nix";
-        rev = "...(latest)";
-        sha256 = "";
-    };
+  foldExtensions = super.lib.foldr super.lib.composeExtensions (_: _: { });
+  splices-load-save-nix = super.fetchFromGitHub {
+    owner = "obsidiansystems";
+    repo = "splices-load-save.nix";
+    rev = "...(latest)";
+    sha256 = "";
+  };
   splices-func = import splices-load-save-nix {
     pkgs = super;
   };
@@ -53,4 +53,4 @@ rec {
         };
     };
 })
-```     
+```
