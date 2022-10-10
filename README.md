@@ -4,13 +4,13 @@ Splices for Haskell, decoupled from reflex-platform, with helper functions in ni
 # Overview
 
 ## Who Should consider using this?
-* Anyone that doesn't need all of the features of reflex-platform, and just needs a relatively easy way to pull up splices on a non-reflex project.
-* Anyone that wants/needs splices for GHCJS
+* Anyone that wants to build code that uses template haskell for platforms where template haskell isn't supported (e.g., mobile)
+* Anyone that wants/needs splices for GHCJS (if, e.g., you're encountering slow GHCJS template haskell compilation times)
 
 ## Caveats
-* Build times are close to double due to having to build most libraries twice
-  * This is mitigated by having a nix cache setup that already has these spliced libraries working
-* More than likely you will have to build GHC
+* Most libraries must be built twice, once for the platform dumping the splices and once for the platform that will load the splices
+  * This is mitigated by having a nix cache setup that already has these spliced libraries built
+* More than likely you will have to build the patched GHC 
 
 # How to use
 ### GHC & GHCJS:
